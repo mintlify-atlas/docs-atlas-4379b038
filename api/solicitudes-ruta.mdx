@@ -1,0 +1,201 @@
+---
+title: "Solicitudes Ruta API: Simulate Route Requests"
+sidebarTitle: "Solicitudes Ruta"
+description: "Reference for POST /api/solicitudes-ruta/simular, which generates an in-memory folio for a single-address pickup or delivery request in Scan4."
+---
+
+The **Solicitudes Ruta API** is an `[ApiController]` mounted at `/api/solicitudes-ruta`. It backs the **"Nueva ruta"** modal, where a dispatcher captures a single-address pickup or delivery request — including optional package dimensions for volume calculation. The route distance and travel time are pre-calculated in the browser by Google `DirectionsService` before the form is submitted; the server does not recalculate them.
+
+The controller has a single endpoint: `POST /api/solicitudes-ruta/simular`. No data is written to a database. The only server-side side effect is the generation of an in-memory folio reference and a structured log line. This design allows the frontend UX to be fully validated before a persistence layer is added.
+
+<Note>
+  Both the folio counter and the request data are held in memory only. Restarting the application resets the counter to 400 and all previously generated folios are lost. In production, replace `FolioGeneradorEnMemoria` with a database-backed implementation of `IFolioGenerador`.
+</Note>
+
+---
+
+## POST /api/solicitudes-ruta/simular
+
+Validates a single-address route request, assigns an in-memory folio, and returns the echoed request data alongside calculated cubic volume in m³.
+
+<Tabs>
+  <Tab title="Request">
+    ```http
+    POST /api/solicitudes-ruta/simular HTTP/1.1
+    Content-Type: application/json
+    ```
+
+    ```json
+    {
+      "cliente": "Distribuidora Nortec",
+      "tipo": "Recolección",
+      "zona": "Norte",
+      "vehiculo": "Sprinter 03",
+      "operador": "Luis Ramírez",
+      "prioridad": "Alta",
+      "fecha": "2026-07-10T00:00:00",
+      "hora": "10:30",
+      "direccion": "Av. Insurgentes Norte 1457, Gustavo A. Madero, CDMX",
+      "lat": 19.4955,
+      "lng": -99.1327,
+      "observaciones": "Llamar antes de llegar",
+      "distanciaKm": 18.7,
+      "tiempoEstimadoMin": 42,
+      "paquetes": [
+        {
+          "tipo": "Caja",
+          "largoCm": 60,
+          "anchoCm": 40,
+          "altoCm": 30,
+          "cantidad": 3,
+          "cubicajeCm3": 216000
+        }
+      ],
+      "cubicajeTotalCm3": 216000
+    }
+    ```
+
+    <ParamField body="cliente" type="string" required>
+      Name of the client or business placing the request. Used verbatim in the folio confirmation.
+    </ParamField>
+    <ParamField body="tipo" type="string">
+      Service type. Accepted values: `"Recolección"` (default) or `"Entrega"`. This value determines the folio prefix: `REC-` for pickups, `ENT-` for deliveries.
+    </ParamField>
+    <ParamField body="zona" type="string">
+      Delivery zone label (e.g. `"Norte"`, `"Centro"`). Used for routing assignment in a later step.
+    </ParamField>
+    <ParamField body="vehiculo" type="string">
+      Vehicle unit name or code pre-assigned for this request.
+    </ParamField>
+    <ParamField body="operador" type="string">
+      Full name of the driver or operator assigned.
+    </ParamField>
+    <ParamField body="prioridad" type="string">
+      Dispatch priority. Accepted values: `"Alta"`, `"Media"` (default), or `"Baja"`.
+    </ParamField>
+    <ParamField body="fecha" type="string (ISO 8601)" required>
+      Scheduled pickup or delivery date. Combined with `hora` to form `fechaHoraRecoleccion` in the response.
+    </ParamField>
+    <ParamField body="hora" type="string" required>
+      Scheduled time in `HH:mm` format (e.g. `"10:30"`). Appended to `fecha` to build the response timestamp.
+    </ParamField>
+    <ParamField body="direccion" type="string" required>
+      Full street address of the pickup or delivery location. **Must not be empty or whitespace** — validation returns `400` if missing. The address should correspond to a route already calculated in the browser.
+    </ParamField>
+    <ParamField body="lat" type="number">
+      Latitude of the address in decimal degrees, resolved client-side via the Google Maps Geocoder.
+    </ParamField>
+    <ParamField body="lng" type="number">
+      Longitude of the address in decimal degrees.
+    </ParamField>
+    <ParamField body="observaciones" type="string">
+      Free-text delivery notes (e.g. `"Llamar antes de llegar"`). Optional — send `null` or omit.
+    </ParamField>
+    <ParamField body="distanciaKm" type="number">
+      Distance from the fixed departure point to this address, calculated by `DirectionsService` in the browser.
+    </ParamField>
+    <ParamField body="tiempoEstimadoMin" type="number">
+      Estimated travel time in minutes, calculated by `DirectionsService` in the browser.
+    </ParamField>
+    <ParamField body="paquetes" type="array of PaqueteSolicitud">
+      Optional list of packages captured in the cubicaje sub-form (`wwwroot/js/paquetes-cubicaje.js`). If the cubicaje module is inactive, send an empty array `[]` or omit the field entirely.
+      <Expandable title="PaqueteSolicitud fields">
+        <ParamField body="tipo" type="string">Package type label, e.g. `"Sobre"`, `"Caja"`, `"Tarima"`.</ParamField>
+        <ParamField body="largoCm" type="number">Length in centimeters.</ParamField>
+        <ParamField body="anchoCm" type="number">Width in centimeters.</ParamField>
+        <ParamField body="altoCm" type="number">Height in centimeters.</ParamField>
+        <ParamField body="cantidad" type="integer">Number of units of this package type.</ParamField>
+        <ParamField body="cubicajeCm3" type="number">
+          Pre-calculated volume in cm³ for this line (`largo × ancho × alto × cantidad`), computed by the browser.
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    <ParamField body="cubicajeTotalCm3" type="number">
+      Total cubic volume in cm³ across all packages, summed client-side. The server converts this to m³ (`÷ 1,000,000`, rounded to 3 decimal places) and includes both values in the response.
+    </ParamField>
+  </Tab>
+  <Tab title="Response 200">
+    Returns a `SolicitudRutaResponse` confirming the folio and echoing all submitted data plus the calculated m³ volume.
+
+    ```json
+    {
+      "folio": "REC-000401",
+      "cliente": "Distribuidora Nortec",
+      "tipo": "Recolección",
+      "fechaHoraRecoleccion": "2026-07-10 10:30",
+      "paquetes": [
+        {
+          "tipo": "Caja",
+          "largoCm": 60,
+          "anchoCm": 40,
+          "altoCm": 30,
+          "cantidad": 3,
+          "cubicajeCm3": 216000
+        }
+      ],
+      "cubicajeTotalCm3": 216000,
+      "cubicajeTotalM3": 0.216,
+      "mensaje": "Solicitud REC-000401 registrada correctamente (simulada; no hay base de datos aún)."
+    }
+    ```
+
+    <ResponseField name="folio" type="string">
+      Unique reference folio generated by `FolioGeneradorEnMemoria`. Format: `{prefix}-{counter:000000}` where prefix is `REC` for pickups and `ENT` for deliveries. Counter starts at 401 (initial value is 400, incremented atomically via `Interlocked.Increment`).
+    </ResponseField>
+    <ResponseField name="cliente" type="string">
+      Echoed from the request `cliente` field.
+    </ResponseField>
+    <ResponseField name="tipo" type="string">
+      Echoed service type: `"Recolección"` or `"Entrega"`.
+    </ResponseField>
+    <ResponseField name="fechaHoraRecoleccion" type="string">
+      Combined date and time string formatted as `"yyyy-MM-dd HH:mm"` (e.g. `"2026-07-10 10:30"`). Assembled server-side from `fecha` and `hora`.
+    </ResponseField>
+    <ResponseField name="paquetes" type="array of PaqueteSolicitud">
+      Echoed package list. If none were submitted, returns an empty array `[]`.
+    </ResponseField>
+    <ResponseField name="cubicajeTotalCm3" type="number">
+      Echoed total volume in cubic centimeters as submitted.
+    </ResponseField>
+    <ResponseField name="cubicajeTotalM3" type="number">
+      Server-calculated conversion: `cubicajeTotalCm3 ÷ 1,000,000`, rounded to 3 decimal places using `Math.Round`.
+    </ResponseField>
+    <ResponseField name="mensaje" type="string">
+      Human-readable confirmation that includes the assigned folio and a notice that no database persistence has occurred yet.
+    </ResponseField>
+  </Tab>
+  <Tab title="Response 400">
+    Returned when `direccion` is null, empty, or consists entirely of whitespace.
+
+    ```json
+    {
+      "mensaje": "La solicitud debe incluir una dirección con ruta calculada."
+    }
+    ```
+
+    <ResponseField name="mensaje" type="string">
+      Human-readable validation error explaining the missing field.
+    </ResponseField>
+  </Tab>
+</Tabs>
+
+---
+
+## Folio Format
+
+Folios are generated by `FolioGeneradorEnMemoria`, a singleton service registered in the DI container. The format is:
+
+```
+{PREFIX}-{COUNTER:000000}
+```
+
+| Prefix | Condition |
+|--------|-----------|
+| `REC`  | `tipo` is any value other than `"Entrega"` (case-insensitive) |
+| `ENT`  | `tipo` is `"Entrega"` (case-insensitive) |
+
+The counter is initialized at `400` and incremented atomically with `Interlocked.Increment`, so the first folio of a process run is always `REC-000401` or `ENT-000401`. The counter is **shared across all request types** — each call to `simular` consumes one counter value regardless of `tipo`.
+
+<Tip>
+  When replacing `FolioGeneradorEnMemoria` with a database-backed implementation, seed the counter from the highest existing folio number to avoid collisions with previously issued references.
+</Tip>

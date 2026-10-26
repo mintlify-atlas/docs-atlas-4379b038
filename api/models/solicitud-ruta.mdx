@@ -1,0 +1,357 @@
+---
+title: "SolicitudRutaRequest and Response Models"
+sidebarTitle: "SolicitudRuta Models"
+description: "Request, response, and package sub-models for POST /api/solicitudes-ruta/simular, including cubicage fields and the AI route-suggestion stub contract."
+---
+
+The *Nueva ruta* modal in Scan4 follows a different workflow from the multi-stop Route Builder: it registers a **single-address** pickup or delivery request, calculates the distance from the warehouse to that one address via the Google Maps `DirectionsService`, and returns a reference folio — all without writing to a database. The models documented on this page define every JSON field involved in that flow, plus the `SugerirRuta` stub contract shared by the route-suggestion feature.
+
+## SolicitudRutaRequest
+
+`SolicitudRutaRequest` is the body expected by `POST /api/solicitudes-ruta/simular`. It captures the full context of the request — address, logistics metadata, and an optional list of packages with pre-computed cubicage.
+
+```csharp
+// Models/Mapas/SolicitudRutaModels.cs (excerpt)
+public class SolicitudRutaRequest
+{
+    [JsonPropertyName("cliente")]        public string Cliente { get; set; } = string.Empty;
+    [JsonPropertyName("tipo")]           public string Tipo { get; set; } = "Recolección";
+    [JsonPropertyName("zona")]           public string Zona { get; set; } = string.Empty;
+    [JsonPropertyName("vehiculo")]       public string Vehiculo { get; set; } = string.Empty;
+    [JsonPropertyName("operador")]       public string Operador { get; set; } = string.Empty;
+    [JsonPropertyName("prioridad")]      public string Prioridad { get; set; } = "Media";
+    [JsonPropertyName("fecha")]          public DateTime Fecha { get; set; }
+    [JsonPropertyName("hora")]           public string Hora { get; set; } = string.Empty;
+    [JsonPropertyName("direccion")]      public string Direccion { get; set; } = string.Empty;
+    [JsonPropertyName("lat")]            public double Lat { get; set; }
+    [JsonPropertyName("lng")]            public double Lng { get; set; }
+    [JsonPropertyName("observaciones")]  public string? Observaciones { get; set; }
+    [JsonPropertyName("distanciaKm")]    public double DistanciaKm { get; set; }
+    [JsonPropertyName("tiempoEstimadoMin")] public double TiempoEstimadoMin { get; set; }
+    [JsonPropertyName("paquetes")]       public List<PaqueteSolicitud> Paquetes { get; set; } = new();
+    [JsonPropertyName("cubicajeTotalCm3")] public double CubicajeTotalCm3 { get; set; }
+}
+```
+
+### Fields
+
+<ResponseField name="cliente" type="string" required>
+  Name of the requesting client company (e.g. `"Distribuidora López S.A."`). Echoed back in the response and printed on the folio confirmation.
+</ResponseField>
+
+<ResponseField name="tipo" type="string" default="Recolección">
+  Type of service requested. Typical values are `"Recolección"` (pickup) and `"Entrega"` (delivery). Shown on the folio and used to filter requests in the dashboard.
+</ResponseField>
+
+<ResponseField name="zona" type="string" required>
+  Delivery zone for routing and scheduling (e.g. `"Norte"`, `"Centro"`, `"Sur"`). Used to group pending requests when assembling a multi-stop route later in the *Rutas del día* view.
+</ResponseField>
+
+<ResponseField name="vehiculo" type="string" required>
+  Human-readable vehicle name assigned to the request (e.g. `"Unidad 105"`).
+</ResponseField>
+
+<ResponseField name="operador" type="string" required>
+  Full name of the operator or driver assigned (e.g. `"Carlos Mendoza"`).
+</ResponseField>
+
+<ResponseField name="prioridad" type="string" default="Media">
+  Urgency level: `"Alta"`, `"Media"`, or `"Baja"`. Controls badge color in the request list.
+</ResponseField>
+
+<ResponseField name="fecha" type="string (ISO 8601 DateTime)" required>
+  Scheduled service date and time in ISO 8601 format (e.g. `"2026-07-10T00:00:00"`). Combined with `hora` when building the `fechaHoraRecoleccion` string in the response.
+</ResponseField>
+
+<ResponseField name="hora" type="string (HH:mm)" required>
+  Scheduled service time in 24-hour format (e.g. `"10:30"`). Stored separately from `fecha` so the UI can display and edit them independently.
+</ResponseField>
+
+<ResponseField name="direccion" type="string" required>
+  Full street address of the pickup or delivery point as geocoded by the Google Maps Autocomplete widget in the form (e.g. `"Av. Insurgentes Sur 1457, Col. Insurgentes Mixcoac, CDMX"`).
+</ResponseField>
+
+<ResponseField name="lat" type="double" required>
+  Latitude of the service address in decimal degrees (WGS 84), returned by the Autocomplete geocoder.
+</ResponseField>
+
+<ResponseField name="lng" type="double" required>
+  Longitude of the service address in decimal degrees (WGS 84).
+</ResponseField>
+
+<ResponseField name="observaciones" type="string | null">
+  Optional free-text notes from the operator (e.g. access instructions, fragility warnings). May be `null` if no notes were entered.
+</ResponseField>
+
+<ResponseField name="distanciaKm" type="double" required>
+  Distance in kilometres from the fixed warehouse origin to the service address, calculated by the Google Maps `DirectionsService` in the browser before the form is submitted.
+</ResponseField>
+
+<ResponseField name="tiempoEstimadoMin" type="double" required>
+  Estimated travel time in minutes from the warehouse to the service address, also from `DirectionsService`.
+</ResponseField>
+
+<ResponseField name="paquetes" type="array of PaqueteSolicitud">
+  List of packages included in the request. Cubicage for each package is calculated in the browser by `wwwroot/js/paquetes-cubicaje.js` — the server does not recalculate it. May be an empty array if no packages were declared.
+
+  <Expandable title="PaqueteSolicitud fields">
+    <ResponseField name="tipo" type="string" required>
+      Package category. Must be one of `"Sobre"` (envelope), `"Caja"` (box), or `"Tarima"` (pallet). Determines which dimension fields are relevant.
+    </ResponseField>
+    <ResponseField name="largoCm" type="double" required>
+      Length of the package in centimetres.
+    </ResponseField>
+    <ResponseField name="anchoCm" type="double" required>
+      Width of the package in centimetres.
+    </ResponseField>
+    <ResponseField name="altoCm" type="double" required>
+      Height of the package in centimetres.
+    </ResponseField>
+    <ResponseField name="cantidad" type="int" required>
+      Number of units of this package type. The browser multiplies the unit volume by this quantity to compute `cubicajeCm3`.
+    </ResponseField>
+    <ResponseField name="cubicajeCm3" type="double" required>
+      Pre-computed volume in cubic centimetres: `largoCm × anchoCm × altoCm × cantidad`. Calculated in `paquetes-cubicaje.js` before submission. The server stores and echoes this value without recomputing it.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="cubicajeTotalCm3" type="double" required>
+  Sum of all `cubicajeCm3` values across the `paquetes` array, also computed in the browser. The server echoes it back and converts it to cubic metres in the response (`cubicajeTotalM3`).
+</ResponseField>
+
+---
+
+## SolicitudRutaResponse
+
+`SolicitudRutaResponse` is the body returned by `POST /api/solicitudes-ruta/simular`. The endpoint does not persist data — it generates a sequential reference folio and echoes the request details so the frontend can display a confirmation to the user.
+
+```csharp
+// Models/Mapas/SolicitudRutaModels.cs (excerpt)
+public class SolicitudRutaResponse
+{
+    [JsonPropertyName("folio")]                public string Folio { get; set; } = string.Empty;
+    [JsonPropertyName("cliente")]              public string Cliente { get; set; } = string.Empty;
+    [JsonPropertyName("tipo")]                 public string Tipo { get; set; } = string.Empty;
+    [JsonPropertyName("fechaHoraRecoleccion")] public string FechaHoraRecoleccion { get; set; } = string.Empty;
+    [JsonPropertyName("paquetes")]             public List<PaqueteSolicitud> Paquetes { get; set; } = new();
+    [JsonPropertyName("cubicajeTotalCm3")]     public double CubicajeTotalCm3 { get; set; }
+    [JsonPropertyName("cubicajeTotalM3")]      public double CubicajeTotalM3 { get; set; }
+    [JsonPropertyName("mensaje")]              public string Mensaje { get; set; } = string.Empty;
+}
+```
+
+### Fields
+
+<ResponseField name="folio" type="string">
+  Auto-generated reference number in the format `REC-XXXXXX` (e.g. `"REC-000401"`). Produced by `FolioGeneradorEnMemoria`, which keeps an in-memory counter that resets on application restart. The folio is for display and reference only — it is not persisted in a database in the current release.
+</ResponseField>
+
+<ResponseField name="cliente" type="string">
+  Echoed from `SolicitudRutaRequest.cliente`.
+</ResponseField>
+
+<ResponseField name="tipo" type="string">
+  Echoed from `SolicitudRutaRequest.tipo`.
+</ResponseField>
+
+<ResponseField name="fechaHoraRecoleccion" type="string">
+  Human-readable combined date-and-time string built from `fecha` and `hora` (e.g. `"10/07/2026 10:30"`). Formatted server-side for direct display in the confirmation modal.
+</ResponseField>
+
+<ResponseField name="paquetes" type="array of PaqueteSolicitud">
+  The full `paquetes` array echoed back from the request, preserving all dimension, quantity, and pre-computed cubicage values so the frontend can render a package summary without re-parsing the original form data.
+</ResponseField>
+
+<ResponseField name="cubicajeTotalCm3" type="double">
+  Total volume in cubic centimetres, echoed from the request.
+</ResponseField>
+
+<ResponseField name="cubicajeTotalM3" type="double">
+  Total volume converted to cubic metres, rounded to 3 decimal places (`cubicajeTotalCm3 / 1_000_000`). Provided for convenience — vehicle load-capacity checks are typically expressed in m³.
+</ResponseField>
+
+<ResponseField name="mensaje" type="string">
+  Human-readable confirmation message shown in the success modal (e.g. `"Solicitud registrada correctamente con el folio REC-000401"`).
+</ResponseField>
+
+---
+
+## SugerirRutaRequest
+
+`SugerirRutaRequest` is sent to `POST /api/rutas-mapa/sugerir` when the operator clicks **Sugerir ruta** in the Route Builder. The endpoint is a documented stub — it accepts and validates the payload but does not invoke any AI model yet.
+
+```csharp
+// Models/Mapas/SugerenciaRutaModels.cs
+public class SugerirRutaRequest
+{
+    [JsonPropertyName("zona")]                    public string Zona { get; set; } = string.Empty;
+    [JsonPropertyName("pedidosDisponiblesIds")]    public List<int> PedidosDisponiblesIds { get; set; } = new();
+    [JsonPropertyName("choferesDisponibles")]      public int ChoferesDisponibles { get; set; } = 1;
+    [JsonPropertyName("tipoCamion")]               public string? TipoCamion { get; set; }
+    [JsonPropertyName("cargaEstimadaM3")]          public double? CargaEstimadaM3 { get; set; }
+}
+```
+
+<ResponseField name="zona" type="string" required>
+  Zone for which the AI should suggest a route. Passed through to the future AI backend to scope the optimization.
+</ResponseField>
+
+<ResponseField name="pedidosDisponiblesIds" type="array of int" required>
+  List of pending order IDs that should be considered for ordering. When the AI engine is connected, it will use this list to propose a visit sequence.
+</ResponseField>
+
+<ResponseField name="choferesDisponibles" type="int" default="1">
+  Number of drivers available for this zone. Used by the future AI model to decide whether to split the route across multiple vehicles.
+</ResponseField>
+
+<ResponseField name="tipoCamion" type="string | null">
+  Vehicle type hint for capacity planning (e.g. `"3.5 Ton"`, `"Camioneta"`). Optional; `null` until the vehicle catalog integration is built.
+</ResponseField>
+
+<ResponseField name="cargaEstimadaM3" type="double | null">
+  Estimated total cargo volume in cubic metres. Optional; `null` if no cubicage data is available.
+</ResponseField>
+
+---
+
+## SugerirRutaResponse
+
+`SugerirRutaResponse` is returned by `POST /api/rutas-mapa/sugerir`. Until the AI backend is connected, `disponible` is always `false` and the response body explains what needs to be configured.
+
+```csharp
+// Models/Mapas/SugerenciaRutaModels.cs
+public class SugerirRutaResponse
+{
+    [JsonPropertyName("disponible")]     public bool Disponible { get; set; } = false;
+    [JsonPropertyName("mensaje")]        public string Mensaje { get; set; } =
+        "La sugerencia de rutas por IA aún no está conectada. " +
+        "Próximamente esta acción consumirá un modelo de lenguaje que, con base " +
+        "en choferes disponibles, tipo de camión y carga, propondrá el orden " +
+        "óptimo de los pedidos seleccionados.";
+    [JsonPropertyName("ordenSugerido")] public List<int>? OrdenSugerido { get; set; }
+}
+```
+
+<ResponseField name="disponible" type="bool" default="false">
+  Always `false` in the current release. Will be `true` once the AI suggestion engine is integrated. The frontend uses this flag to decide whether to apply the suggested order to the grid or show the informational stub message.
+</ResponseField>
+
+<ResponseField name="mensaje" type="string">
+  Explanatory message. In the stub it describes what the AI feature will do when enabled. When the engine is connected, this field will carry a short summary of the suggestion rationale.
+</ResponseField>
+
+<ResponseField name="ordenSugerido" type="array of int | null" default="null">
+  Reserved. When the AI engine is connected, this will be an ordered list of `DestinoLogistico.id` values representing the suggested visit sequence. The frontend will apply this order to the grid and set `ordenSugerido` on each matching stop. Always `null` today.
+</ResponseField>
+
+---
+
+## Full JSON Examples
+
+<Tabs>
+  <Tab title="SolicitudRutaRequest">
+    ```json
+    {
+      "cliente": "Textiles Norteños S.A. de C.V.",
+      "tipo": "Recolección",
+      "zona": "Norte",
+      "vehiculo": "Unidad 105",
+      "operador": "Carlos Mendoza",
+      "prioridad": "Alta",
+      "fecha": "2026-07-10T00:00:00",
+      "hora": "10:30",
+      "direccion": "Av. Insurgentes Sur 1457, Col. Insurgentes Mixcoac, CDMX",
+      "lat": 19.3714,
+      "lng": -99.1779,
+      "observaciones": "Fragile — handle with care. Gate code: 4821.",
+      "distanciaKm": 8.3,
+      "tiempoEstimadoMin": 22,
+      "paquetes": [
+        {
+          "tipo": "Caja",
+          "largoCm": 60,
+          "anchoCm": 40,
+          "altoCm": 30,
+          "cantidad": 4,
+          "cubicajeCm3": 288000
+        },
+        {
+          "tipo": "Sobre",
+          "largoCm": 32,
+          "anchoCm": 24,
+          "altoCm": 1,
+          "cantidad": 10,
+          "cubicajeCm3": 7680
+        }
+      ],
+      "cubicajeTotalCm3": 295680
+    }
+    ```
+  </Tab>
+  <Tab title="SolicitudRutaResponse">
+    ```json
+    {
+      "folio": "REC-000401",
+      "cliente": "Textiles Norteños S.A. de C.V.",
+      "tipo": "Recolección",
+      "fechaHoraRecoleccion": "10/07/2026 10:30",
+      "paquetes": [
+        {
+          "tipo": "Caja",
+          "largoCm": 60,
+          "anchoCm": 40,
+          "altoCm": 30,
+          "cantidad": 4,
+          "cubicajeCm3": 288000
+        },
+        {
+          "tipo": "Sobre",
+          "largoCm": 32,
+          "anchoCm": 24,
+          "altoCm": 1,
+          "cantidad": 10,
+          "cubicajeCm3": 7680
+        }
+      ],
+      "cubicajeTotalCm3": 295680,
+      "cubicajeTotalM3": 0.296,
+      "mensaje": "Solicitud registrada correctamente con el folio REC-000401"
+    }
+    ```
+  </Tab>
+  <Tab title="SugerirRutaRequest">
+    ```json
+    {
+      "zona": "Centro",
+      "pedidosDisponiblesIds": [101, 102, 105, 108],
+      "choferesDisponibles": 2,
+      "tipoCamion": "3.5 Ton",
+      "cargaEstimadaM3": 4.5
+    }
+    ```
+  </Tab>
+  <Tab title="SugerirRutaResponse (stub)">
+    ```json
+    {
+      "disponible": false,
+      "mensaje": "La sugerencia de rutas por IA aún no está conectada. Próximamente esta acción consumirá un modelo de lenguaje que, con base en choferes disponibles, tipo de camión y carga, propondrá el orden óptimo de los pedidos seleccionados.",
+      "ordenSugerido": null
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Info>
+  The `POST /api/solicitudes-ruta/simular` endpoint is intentionally **stateless** — it generates a folio and echoes the payload back but does not persist anything. Connecting the folio sequence and the request data to the production database is listed as a pending task for the next development phase.
+</Info>
+
+<Tip>
+  The `cubicajeTotalM3` value in the response is rounded to 3 decimal places. If you need higher precision for capacity planning, divide `cubicajeTotalCm3` by `1,000,000` yourself — the full-precision value is always available in the request echo.
+</Tip>
+
+## Related Resources
+
+- [Solicitudes Ruta API](/api/solicitudes-ruta) — endpoint reference for `POST /api/solicitudes-ruta/simular` and the full controller behavior.
+- [RutaLogisticaRequest](/api/models/ruta-logistica) — the multi-stop route model created after a `SolicitudRutaRequest` has been processed and added to a *Rutas del día* card.
+- [DestinoLogistico](/api/models/destino-logistico) — individual delivery stop schema used inside `RutaLogisticaRequest`.

@@ -1,0 +1,195 @@
+---
+title: "RutaLogisticaRequest: Route Data Model Reference"
+sidebarTitle: "RutaLogisticaRequest"
+description: "Complete field reference for RutaLogisticaRequest, the root JSON structure consumed by POST /api/rutas-mapa and returned by GET /api/rutas-mapa/{rutaId}."
+---
+
+`RutaLogisticaRequest` is the root JSON object that represents a fully assembled logistics route in Scan4. It is produced by the **Armar ruta** window (opened from the *Rutas del día* dashboard) when the operator presses **Crear ruta**, then posted to `POST /api/rutas-mapa` for in-memory persistence. The same structure is returned verbatim by `GET /api/rutas-mapa/{rutaId}`, making it both the write and read contract for the route lifecycle.
+
+## C# Class Definition
+
+The class lives in `Models/Mapas/RutaLogisticaRequest.cs` and uses `System.Text.Json` property-name attributes so every JSON key is explicitly declared — no runtime name-mangling surprises.
+
+```csharp
+// Models/Mapas/RutaLogisticaRequest.cs
+using System.Text.Json.Serialization;
+
+namespace Pedidoslogistica.Models.Mapas;
+
+/// Estructura raíz del JSON que representa una ruta armada desde la ventana
+/// "Armar ruta" (botón "Crear ruta"), abierta desde "Rutas del día".
+
+public class RutaLogisticaRequest
+{
+    [JsonPropertyName("rutaId")]
+    public int RutaId { get; set; }
+
+    [JsonPropertyName("origen")]
+    public PuntoGeografico Origen { get; set; } = new();
+
+    [JsonPropertyName("destinos")]
+    public List<DestinoLogistico> Destinos { get; set; } = new();
+
+    [JsonPropertyName("zona")]
+    public string Zona { get; set; } = string.Empty;
+
+    [JsonPropertyName("vehiculo")]
+    public string Vehiculo { get; set; } = string.Empty;
+
+    [JsonPropertyName("operador")]
+    public string Operador { get; set; } = string.Empty;
+
+    [JsonPropertyName("prioridad")]
+    public string Prioridad { get; set; } = "Media";
+
+    [JsonPropertyName("fechaRuta")]
+    public DateTime? FechaRuta { get; set; }
+
+    [JsonPropertyName("distanciaKm")]
+    public double DistanciaKm { get; set; }
+
+    [JsonPropertyName("tiempoEstimadoMin")]
+    public double TiempoEstimadoMin { get; set; }
+
+    [JsonPropertyName("fechaCreacion")]
+    public DateTime FechaCreacion { get; set; } = DateTime.Now;
+
+    [JsonPropertyName("generadaPorIA")]
+    public bool GeneradaPorIA { get; set; } = false;
+}
+```
+
+The nested `PuntoGeografico` object used by `origen` is a lightweight two-field struct:
+
+```csharp
+// Models/Mapas/PuntoGeografico.cs
+public class PuntoGeografico
+{
+    [JsonPropertyName("lat")]
+    public double Lat { get; set; }
+
+    [JsonPropertyName("lng")]
+    public double Lng { get; set; }
+}
+```
+
+## Field Reference
+
+<ResponseField name="rutaId" type="int" required>
+  Auto-assigned integer identifier for the route. On creation the client sends `0`; the server replaces it with a generated ID (currently the `RutaRepositoryEnMemoria` assigns sequential values). Always present in `GET` responses.
+</ResponseField>
+
+<ResponseField name="origen" type="object (PuntoGeografico)" required>
+  Fixed warehouse origin from which all route distances are measured. Populated by the frontend with the coordinates of the ScanMex warehouse (`19.384948, -99.174292`). The server does not revalidate or overwrite this value.
+
+  <Expandable title="PuntoGeografico fields">
+    <ResponseField name="lat" type="double" required>
+      Latitude of the origin point in decimal degrees (WGS 84). Example: `19.384948`.
+    </ResponseField>
+    <ResponseField name="lng" type="double" required>
+      Longitude of the origin point in decimal degrees (WGS 84). Example: `-99.174292`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="destinos" type="array of DestinoLogistico" required>
+  Ordered list of delivery stops that were **selected** (checked) in the route-builder grid at the moment **Crear ruta** was pressed. Unselected stops are excluded from this array; they are marked `reprogramado: true` at the `DestinoLogistico` level before the final `POST` is sent. See [DestinoLogistico model](/api/models/destino-logistico) for the full stop schema.
+</ResponseField>
+
+<ResponseField name="zona" type="string" required>
+  Delivery zone label inherited from the *Rutas del día* card that was opened (e.g. `"Centro"`, `"Polanco"`, `"Santa Fe"`). Used for grouping and filtering routes in the dashboard.
+</ResponseField>
+
+<ResponseField name="vehiculo" type="string" required>
+  Human-readable name of the vehicle assigned to the route (e.g. `"Unidad 102"`). Sourced from the *Rutas del día* card metadata; not validated against the vehicle catalog at the API level.
+</ResponseField>
+
+<ResponseField name="operador" type="string" required>
+  Full name of the operator (driver) assigned to the route (e.g. `"María García"`). Sourced from the *Rutas del día* card metadata.
+</ResponseField>
+
+<ResponseField name="prioridad" type="string" default="Media">
+  Route execution priority. Must be one of `"Alta"`, `"Media"`, or `"Baja"`. Defaults to `"Media"` when not supplied. Controls visual badge color in the dashboard.
+</ResponseField>
+
+<ResponseField name="fechaRuta" type="string (ISO 8601 DateTime) | null">
+  Scheduled date for the route (e.g. `"2026-07-09T00:00:00"`). Nullable — a `null` value means no date has been committed yet. Populated from the date of the *Rutas del día* card.
+</ResponseField>
+
+<ResponseField name="distanciaKm" type="double" required>
+  Total route distance in kilometres as calculated by the Google Maps `DirectionsService` in the browser at the moment the route was created. The server stores and returns this value as-is; it is never recalculated server-side.
+</ResponseField>
+
+<ResponseField name="tiempoEstimadoMin" type="double" required>
+  Estimated travel time in minutes for the complete route, also sourced from the `DirectionsService` response. Includes traffic conditions at the time of calculation.
+</ResponseField>
+
+<ResponseField name="fechaCreacion" type="string (ISO 8601 DateTime)" required>
+  Server-side timestamp set when the object is instantiated (`DateTime.Now`). The client does not need to supply this field; if it is omitted the server default applies.
+</ResponseField>
+
+<ResponseField name="generadaPorIA" type="bool" default="false">
+  Flag indicating whether the stop order was produced by the **Sugerir ruta** AI button rather than arranged manually by the operator. Always `false` in the current release because the AI backend is a stub (`POST /api/rutas-mapa/sugerir`). Reserved for the future AI integration.
+</ResponseField>
+
+## Full JSON Example
+
+The following example shows a route with two active delivery stops created for the Centro zone.
+
+```json
+{
+  "rutaId": 1001,
+  "origen": {
+    "lat": 19.384948,
+    "lng": -99.174292
+  },
+  "destinos": [
+    {
+      "id": 1,
+      "nombre": "Centro Histórico",
+      "cliente": "Distribuidora López S.A.",
+      "lat": 19.4326,
+      "lng": -99.1332,
+      "activo": true,
+      "fecha": "2026-07-09",
+      "hora": "09:00",
+      "reprogramado": false,
+      "ordenSugerido": null
+    },
+    {
+      "id": 2,
+      "nombre": "Tepito",
+      "cliente": "Mayoreo del Norte",
+      "lat": 19.4411,
+      "lng": -99.1253,
+      "activo": true,
+      "fecha": "2026-07-09",
+      "hora": "10:30",
+      "reprogramado": false,
+      "ordenSugerido": null
+    }
+  ],
+  "zona": "Centro",
+  "vehiculo": "Unidad 102",
+  "operador": "María García",
+  "prioridad": "Media",
+  "fechaRuta": "2026-07-09T00:00:00",
+  "distanciaKm": 12.4,
+  "tiempoEstimadoMin": 35,
+  "fechaCreacion": "2026-07-09T08:45:00",
+  "generadaPorIA": false
+}
+```
+
+<Note>
+  On a `POST /api/rutas-mapa` request, set `rutaId` to `0`. The repository assigns the final ID and the response body returns the same object with `rutaId` populated.
+</Note>
+
+<Warning>
+  `distanciaKm` and `tiempoEstimadoMin` are computed client-side by the Google Maps `DirectionsService`. The API does not verify them — always call **Mostrar ruta** in the Route Builder before pressing **Crear ruta** to ensure the values are current and reflect live traffic.
+</Warning>
+
+## Related Models
+
+- [DestinoLogistico](/api/models/destino-logistico) — schema for each element in the `destinos` array.
+- [SolicitudRuta Models](/api/models/solicitud-ruta) — separate request/response pair used by the *Nueva ruta* single-address form.

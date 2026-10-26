@@ -1,0 +1,189 @@
+---
+title: "DestinoLogistico: Delivery Stop Model Reference"
+sidebarTitle: "DestinoLogistico"
+description: "Full field reference for DestinoLogistico, the delivery-stop object nested inside RutaLogisticaRequest, including the activo/reprogramado lifecycle."
+---
+
+`DestinoLogistico` represents a single delivery stop within an assembled logistics route. Every element of the `destinos` array inside a `RutaLogisticaRequest` conforms to this schema. The Route Builder grid in the **Armar ruta** window exposes each field directly to the operator — checkboxes toggle `activo`, and the date/time cells write back to `fecha` and `hora` before the route is created.
+
+## C# Class Definition
+
+```csharp
+// Models/Mapas/DestinoLogistico.cs
+using System.Text.Json.Serialization;
+
+namespace Pedidoslogistica.Models.Mapas;
+
+/// Representa un destino dentro de una ruta armada en el módulo de mapas
+/// (ventana "Armar ruta" abierta desde "Rutas del día").
+
+public class DestinoLogistico
+{
+    [JsonPropertyName("id")]
+    public int Id { get; set; }
+
+    [JsonPropertyName("nombre")]
+    public string Nombre { get; set; } = string.Empty;
+
+    [JsonPropertyName("cliente")]
+    public string Cliente { get; set; } = string.Empty;
+
+    [JsonPropertyName("lat")]
+    public double Lat { get; set; }
+
+    [JsonPropertyName("lng")]
+    public double Lng { get; set; }
+
+    [JsonPropertyName("activo")]
+    public bool Activo { get; set; } = true;
+
+    [JsonPropertyName("fecha")]
+    public string Fecha { get; set; } = string.Empty;
+
+    [JsonPropertyName("hora")]
+    public string Hora { get; set; } = string.Empty;
+
+    [JsonPropertyName("reprogramado")]
+    public bool Reprogramado { get; set; } = false;
+
+    [JsonPropertyName("ordenSugerido")]
+    public int? OrdenSugerido { get; set; }
+}
+```
+
+## Field Reference
+
+<ResponseField name="id" type="int" required>
+  Unique integer identifier for this stop within the route. Assigned by the front-end catalog (`CATALOGO_DESTINOS` in `rutas2.js`) and carried through to the API unchanged. The server does not reassign IDs.
+</ResponseField>
+
+<ResponseField name="nombre" type="string" required>
+  Display name of the destination — typically a neighborhood or zone label (e.g. `"Polanco"`, `"Centro Histórico"`, `"Xochimilco"`). Shown as the primary label in the grid row and as the map marker tooltip.
+</ResponseField>
+
+<ResponseField name="cliente" type="string" required>
+  Name of the client company associated with this delivery stop (e.g. `"Grupo ABC"`). Displayed in the second column of the route-builder grid so operators can identify the consignee at a glance.
+</ResponseField>
+
+<ResponseField name="lat" type="double" required>
+  Latitude of the delivery stop in decimal degrees (WGS 84). Used by the Google Maps `DirectionsService` to compute turn-by-turn directions and total distance.
+</ResponseField>
+
+<ResponseField name="lng" type="double" required>
+  Longitude of the delivery stop in decimal degrees (WGS 84). Paired with `lat` to place the numbered marker on the map canvas.
+</ResponseField>
+
+<ResponseField name="activo" type="bool" default="true">
+  Whether the stop is currently selected for inclusion in the route. The operator toggles this with the checkbox in the leftmost grid column. When `activo` is `false` at the moment **Crear ruta** is pressed, the stop is excluded from the `DirectionsService` waypoints and the route is **not saved** — instead, the stop is flagged for rescheduling (see `reprogramado`).
+</ResponseField>
+
+<ResponseField name="fecha" type="string (yyyy-MM-dd)" required>
+  Scheduled delivery or pickup date for this stop. Editable inline in the grid. When a stop is deselected and rescheduled, the operator sets this field to the new date before pressing **Crear ruta** again. Format must be `yyyy-MM-dd` (e.g. `"2026-07-10"`).
+</ResponseField>
+
+<ResponseField name="hora" type="string (HH:mm)" required>
+  Scheduled delivery time for this stop. Editable inline in the grid alongside `fecha`. Uses 24-hour format (e.g. `"09:00"`, `"14:30"`).
+</ResponseField>
+
+<ResponseField name="reprogramado" type="bool" default="false">
+  Set to `true` when a stop had `activo: false` at the time **Crear ruta** was pressed. The frontend simulates sending a rescheduling notification to the sender and consignee (a screen message only — no real email is sent in the current release) and stores the new `fecha`/`hora` values. A stop with `reprogramado: true` is never included in the saved route's `destinos` array.
+</ResponseField>
+
+<ResponseField name="ordenSugerido" type="int | null" default="null">
+  Reserved field for the AI route-suggestion feature. When `POST /api/rutas-mapa/sugerir` is eventually connected to a real language model, it will return a preferred visit sequence and populate this field with the suggested position (1-based) for each stop. Until then the value is always `null`.
+</ResponseField>
+
+## The `activo` / `reprogramado` Lifecycle
+
+Understanding how these two flags interact is essential for consuming the API correctly. The Route Builder enforces a two-press pattern:
+
+<Steps>
+  <Step title="Operator opens Armar ruta">
+    All stops load with `activo: true` and `reprogramado: false`. The grid shows every stop checked. The operator may uncheck any stop that cannot be delivered today.
+  </Step>
+  <Step title="First press of Crear ruta (unselected stops present)">
+    The frontend detects stops where `activo === false`. It does **not** call `POST /api/rutas-mapa`. Instead it:
+    - Sets `reprogramado = true` on each unchecked stop.
+    - Records the `fecha` and `hora` values the operator entered for those stops.
+    - Displays a modal message simulating the rescheduling notification.
+    The route is **not saved** yet.
+  </Step>
+  <Step title="Second press of Crear ruta (all remaining stops are active)">
+    With no unchecked stops remaining, the frontend builds the final `RutaLogisticaRequest`:
+    - `destinos` contains **only** the active stops (`activo: true`).
+    - Reprogrammed stops are omitted from the array entirely.
+    - `POST /api/rutas-mapa` is called and the route is persisted in memory.
+  </Step>
+</Steps>
+
+<Note>
+  Reprogrammed stops (`reprogramado: true`) are only stored in the browser session during route construction. They are **not** included in the `POST /api/rutas-mapa` payload and are currently not persisted anywhere — the persistence layer for rescheduling is part of the future production database integration.
+</Note>
+
+## JSON Examples
+
+<Tabs>
+  <Tab title="Active stop">
+    A stop that is selected and will be included in the route.
+
+    ```json
+    {
+      "id": 3,
+      "nombre": "Polanco",
+      "cliente": "Grupo ABC",
+      "lat": 19.4330,
+      "lng": -99.1993,
+      "activo": true,
+      "fecha": "2026-07-09",
+      "hora": "09:00",
+      "reprogramado": false,
+      "ordenSugerido": null
+    }
+    ```
+  </Tab>
+  <Tab title="Reprogrammed stop">
+    A stop that the operator unchecked. It has been rescheduled to the next day and will **not** appear in the final saved route.
+
+    ```json
+    {
+      "id": 5,
+      "nombre": "Xochimilco",
+      "cliente": "Flores del Sur",
+      "lat": 19.2638,
+      "lng": -99.1028,
+      "activo": false,
+      "fecha": "2026-07-10",
+      "hora": "08:30",
+      "reprogramado": true,
+      "ordenSugerido": null
+    }
+    ```
+  </Tab>
+  <Tab title="AI-ordered stop (future)">
+    A stop whose position in the visit sequence was set by the AI suggestion engine. `ordenSugerido` will be non-null once the AI backend is connected.
+
+    ```json
+    {
+      "id": 2,
+      "nombre": "Santa Fe",
+      "cliente": "Corporativo Nexus",
+      "lat": 19.3601,
+      "lng": -99.2629,
+      "activo": true,
+      "fecha": "2026-07-09",
+      "hora": "11:00",
+      "reprogramado": false,
+      "ordenSugerido": 1
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  Coordinates (`lat`, `lng`) are assigned by the front-end catalog and are not validated by the server. Ensure the catalog values match the actual delivery addresses — incorrect coordinates will cause the `DirectionsService` to compute wrong distances and travel times.
+</Warning>
+
+## Related Models
+
+- [RutaLogisticaRequest](/api/models/ruta-logistica) — the parent object whose `destinos` array contains `DestinoLogistico` items.
+- [SolicitudRuta Models](/api/models/solicitud-ruta) — the single-address request model used by the *Nueva ruta* form (a different workflow from the multi-stop Route Builder).

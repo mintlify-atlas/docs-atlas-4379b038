@@ -1,0 +1,73 @@
+---
+title: "Scan4: Logistics Route Management for ScanMex"
+sidebarTitle: "Introduction"
+description: "Scan4 is an ASP.NET Core 8 MVC platform for ScanMex logistics teams to plan, assign, and track delivery routes with Google Maps and SAP Business One data."
+---
+
+Scan4 — Pedidos Logística is the internal route-management system used by ScanMex to coordinate daily delivery operations. Built on ASP.NET Core 8 MVC, it brings together real-time Google Maps routing, live SAP Business One client data, and a role-based access model so that administrators, supervisors, and operators each see exactly the tools they need. From the moment a route request is created to the moment a driver closes out a delivery run, every step lives in one unified web application.
+
+## Who uses Scan4?
+
+Scan4 serves three groups inside ScanMex:
+
+- **Administrators (U_Rol = '1')** — Full access to all modules including user management, vehicle registry, system configuration, and all route operations.
+- **Supervisors (U_Rol = '2')** — Create and manage routes, assign operators and vehicles, reschedule deliveries, and view reports.
+- **Operators (U_Rol = '3')** — Read-only view of their own assigned routes; cannot create, edit, or reassign.
+
+## Explore the modules
+
+<CardGroup cols={2}>
+  <Card
+    title="Dashboard"
+    icon="gauge-high"
+    href="/features/dashboard"
+  >
+    KPI overview and the "Rutas del día" panel — day-by-day route cards from today through the end of the week, each opening the full route-builder map.
+  </Card>
+  <Card
+    title="Routes"
+    icon="route"
+    href="/features/routes"
+  >
+    The central `LOG_Rutas` table view: create routes, assign operators and vehicles, reschedule dates, finalize deliveries, and pull SAP client details on demand.
+  </Card>
+  <Card
+    title="Route Builder"
+    icon="map"
+    href="/features/route-builder"
+  >
+    The interactive Google Maps modal for arming a route: selectable destination grid, live DirectionsService calculation, AI-suggest stub, and in-memory persistence via `IRutaRepository`.
+  </Card>
+  <Card
+    title="User Administration"
+    icon="users"
+    href="/admin/users"
+  >
+    Create, edit, and disable ScanMex staff accounts. Enforces `@scanmex.com` email domains and maps each user to one or more module permissions.
+  </Card>
+</CardGroup>
+
+## Technology stack
+
+<CardGroup cols={2}>
+  <Card title="Runtime" icon="microsoft">
+    **.NET 8** (ASP.NET Core MVC). Target framework `net8.0`; nullable reference types and implicit usings enabled.
+  </Card>
+  <Card title="Database" icon="database">
+    **SQL Server** via `Microsoft.Data.SqlClient 7.0.1`. Two connection strings: `SqlCon` (logistics DB) and `SqlConSap` (SAP Business One DB).
+  </Card>
+  <Card title="Maps" icon="location-dot">
+    **Google Maps JavaScript API** + Routes API. The `GoogleMapsOptions` model (`ApiKey`, `MapId`) is injected as a strongly-typed configuration object.
+  </Card>
+  <Card title="Auth" icon="lock">
+    **Cookie authentication** with claims-based RBAC. Sessions last 8 hours with sliding expiration. Login validates credentials against the `SMX_OHEM` table.
+  </Card>
+</CardGroup>
+
+## In-memory route repository and the SQL Server migration path
+
+The map module's route data (`IRutaRepository`) is currently stored in a `ConcurrentDictionary` via `RutaRepositoryEnMemoria` — a Singleton service registered in `Program.cs`. This means created routes persist only for the lifetime of the running process and reset on restart. The design is intentional: because all controllers and front-end scripts consume the same `IRutaRepository` contract and the same JSON shape (`RutaLogisticaRequest`), swapping in a SQL Server–backed repository requires only a new class that implements `IRutaRepository` and a one-line change to the DI registration in `Program.cs`. No controller code, no JavaScript, and no API contracts need to change.
+
+<Note>
+The same migration-path principle applies to route-request folios (`IFolioGenerador`): the in-memory `FolioGeneradorEnMemoria` starts its counter at 400 and formats folios as `ENT-000401` / `REC-000401`. Replace with a database sequence when persisting solicitudes to SQL Server.
+</Note>

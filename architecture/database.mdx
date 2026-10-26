@@ -1,0 +1,335 @@
+---
+title: "Database Schema: SQL Server Tables and Queries"
+sidebarTitle: "Database"
+description: "Core SQL Server tables in SMXLOG, key parameterized queries from Queries.json, SAP B1 client lookup, and how to migrate the in-memory route store to SQL Server."
+---
+
+Scan4 works with two SQL Server instances. The primary logistics database (**SMXLOG**, accessed via `SqlCon`) stores users, vehicles, module assignments, catalogue values, and persisted routes. A second read-only SAP Business One instance (**accessed via `SqlConSap`**) is queried to auto-fill client names and addresses from four regional company databases. All connection strings are Base64-encoded in `appsettings.json` and decoded at runtime by `ConfigurationExtensions.GetDecryptedConnectionString()`.
+
+## Connection Strings
+
+Both connection strings live under the `ConnectionStrings` key in `appsettings.json`:
+
+```json
+// appsettings.json — connection strings (values are Base64-encoded)
+{
+  "ConnectionStrings": {
+    "SqlCon":    "RGF0YSBzb3VyY2U9...",
+    "SqlConSap": "RGF0YSBzb3VyY2U9..."
+  }
+}
+```
+
+Model classes decode them before opening a connection:
+
+```csharp
+// Any Model class — reading a connection string
+using var connection = new SqlConnection(
+    _configuration.GetDecryptedConnectionString("SqlCon")
+);
+await connection.OpenAsync();
+```
+
+<Note>
+  `GetDecryptedConnectionString` is an extension method on `IConfiguration` defined in `Helpers/ConfigurationExtensions.cs`. It calls `SecurityHelper.Desencriptar()` to Base64-decode the stored value. See the [Security](/architecture/security) page for details.
+</Note>
+
+## SMXLOG — Core Tables
+
+### `SMX_OHEM` — Users
+
+Stores all application users. The `U_Rol` column drives role-based access control (`'1'` = Administrador, `'2'` = Supervisor, `'3'` = Operador).
+
+| Column | Type | Description |
+|---|---|---|
+| `ID` | INT (PK) | Auto-increment primary key |
+| `empID` | VARCHAR | Employee ID from HR / SAP |
+| `User` | VARCHAR | Login username (unique) |
+| `firstName` | NVARCHAR | Given name |
+| `LastName` | NVARCHAR | Surname |
+| `Email` | VARCHAR | Email address |
+| `U_Rol` | CHAR(1) | Role code: `'1'`, `'2'`, or `'3'` |
+| `Password` | VARCHAR | Base64-encoded password |
+| `Active` | BIT | `1` = active, `0` = soft-deleted |
+| `FechaAlta` | DATETIME | Creation timestamp (`GETDATE()`) |
+| `Mobile` | VARCHAR | Mobile phone number |
+
+### `SMX_MDAP` — User Module Assignments
+
+Maps each user to the modules they can access. Administrators (role `'1'`) receive all module claims automatically and are not stored here.
+
+| Column | Type | Description |
+|---|---|---|
+| `ID_MODULE` | INT | Module identifier (1–5) |
+| `CODE` | VARCHAR | Username (`User` from `SMX_OHEM`) |
+| `empID` | VARCHAR | Employee ID (alternate lookup key) |
+| `ACTIVE` | BIT | `1` = assignment is active |
+
+### `SMX_CATT` — Catalogue Values
+
+Single catalogue table for both roles and modules, differentiated by `TYPE_APP`.
+
+| Column | Type | Description |
+|---|---|---|
+| `CODE` | VARCHAR | Unique code (role: `'1'`/`'2'`/`'3'`; module: numeric string) |
+| `ID_MODULE` | INT | Module ID when `TYPE_APP = 'MODULO'` |
+| `NAME` | NVARCHAR | Human-readable label |
+| `TYPE_APP` | VARCHAR | `'ROL'` or `'MODULO'` |
+| `ACTIVE` | BIT | `1` = active |
+
+### `SMX_VHLS` — Vehicles
+
+Fleet catalogue. Soft-deletes set `Estatus = 'Inactivo'` and record `FechaBaja`.
+
+| Column | Type | Description |
+|---|---|---|
+| `IdVehiculo` | INT (PK) | Auto-increment primary key |
+| `CodigoInterno` | VARCHAR | Internal fleet code |
+| `Placas` | VARCHAR | License plate |
+| `Marca` | VARCHAR | Make (e.g., Mercedes, Freightliner) |
+| `Modelo` | VARCHAR | Model name |
+| `Anio` | INT | Model year |
+| `TipoVehiculo` | VARCHAR | Vehicle category |
+| `Estatus` | VARCHAR | `'Activo'`, `'Inactivo'`, or `'Baja'` |
+| `FechaBaja` | DATETIME | Deactivation date (nullable) |
+| `FechaAlta` | DATETIME | Registration date (`GETDATE()`) |
+| `Observaciones` | NVARCHAR | Free-text notes |
+
+### `SMX_RUTS` — Route Headers
+
+Created on demand by `RutasModel.EnsureTablesCreatedAsync()` if not present. Stores one row per saved logistics route.
+
+| Column | Type | Description |
+|---|---|---|
+| `ID` | INT (PK) | Auto-increment primary key |
+| `CodigoRuta` | VARCHAR(50) | Sequential route code (e.g., `'100'`, `'101'`) |
+| `NombreRuta` | NVARCHAR(150) | Display name |
+| `FechaRuta` | DATE | Planned delivery date |
+| `IdOperador` | INT (FK) | References `SMX_OHEM.ID` |
+| `IdVehiculo` | INT (FK) | References `SMX_VHLS.IdVehiculo` |
+| `OrigenDireccion` | NVARCHAR(300) | Origin address (free text) |
+| `OrigenLat` | DECIMAL(10,7) | Origin latitude |
+| `OrigenLng` | DECIMAL(10,7) | Origin longitude |
+| `Estatus` | VARCHAR(30) | `'programada'`, `'completada'` |
+| `FechaCreacion` | DATETIME | Auto-set to `GETDATE()` |
+| `CreadoPor` | VARCHAR(100) | Username of creator |
+
+### `SMX_RDST` — Route Stops
+
+Stores each delivery stop belonging to a route. Cascades deletes from `SMX_RUTS`.
+
+| Column | Type | Description |
+|---|---|---|
+| `ID` | INT (PK) | Auto-increment primary key |
+| `IdRuta` | INT (FK) | References `SMX_RUTS.ID` (CASCADE DELETE) |
+| `LicTradNum` | VARCHAR(30) | RFC / Tax ID of the client |
+| `CardName` | NVARCHAR(200) | Client business name |
+| `Address` | NVARCHAR(300) | Delivery address |
+| `Phone1` | VARCHAR(50) | Contact phone |
+| `CntctPrsn` | NVARCHAR(100) | Contact person |
+| `City` | NVARCHAR(100) | City |
+| `Latitud` | DECIMAL(10,7) | Stop latitude |
+| `Longitud` | DECIMAL(10,7) | Stop longitude |
+| `TipoDocumento` | VARCHAR(50) | `'Factura'`, `'Remisión'`, etc. |
+| `Prioridad` | VARCHAR(20) | `'Alta'`, `'Media'`, `'Baja'` |
+| `FechaCompromiso` | DATE | Committed delivery date |
+| `HorarioEntrega` | VARCHAR(50) | Delivery time window |
+| `Observaciones` | NVARCHAR(500) | Free-text notes |
+| `Estatus` | VARCHAR(30) | `'Pendiente'`, `'Entregado'`, etc. |
+
+## Key Queries from Queries.json
+
+All SQL is stored in `Queries/Queries.json` and loaded into `IConfiguration` at startup. Model classes read them with `_configuration["Queries:QueryName"]`.
+
+<Accordion title="GetUser — Authentication">
+
+Used by `HomeModel` to validate login credentials. Accepts both Base64-encoded and plain-text passwords for backward compatibility.
+
+```sql
+SELECT
+    T0.[ID], T0.[empID], T0.[User], T0.[firstName], T0.[LastName],
+    T0.[Email], T0.[U_Rol],
+    CASE WHEN T0.[U_Rol] = '1' THEN 'Administrador'
+         WHEN T0.[U_Rol] = '2' THEN 'Supervisor'
+         WHEN T0.[U_Rol] = '3' THEN 'Operador'
+         ELSE 'Usuario' END AS [RolName]
+FROM SMX_OHEM T0
+WHERE (T0.[User] = @User OR T0.[Email] = @User)
+  AND (T0.[Password] = @PasswordEncrypted OR T0.[Password] = @PasswordPlain)
+  AND T0.[Active] = 1
+```
+
+</Accordion>
+
+<Accordion title="GetUserModules — Module Claims">
+
+Returns the module IDs assigned to a user. Results are issued as individual `"Module"` claims at login.
+
+```sql
+SELECT [ID_MODULE]
+FROM SMX_MDAP
+WHERE ([CODE] = @User
+    OR ([empID] IS NOT NULL AND @empID <> '' AND [empID] = @empID))
+  AND [ACTIVE] = 1
+```
+
+</Accordion>
+
+<Accordion title="InsertNewUser — Create User">
+
+Inserts a new user record. The password must already be Base64-encoded by the caller before being passed as `@Password`.
+
+```sql
+INSERT INTO SMX_OHEM
+    ([empID],[User],[firstName],[LastName],[Email],[Password],
+     [U_Rol],[Active],[FechaAlta],[Mobile])
+VALUES
+    (@empID, @User, @firstName, @lastName, @email,
+     @Password, @U_Rol, @Active, GETDATE(), @Mobile)
+```
+
+</Accordion>
+
+<Accordion title="EditUser — Update User">
+
+Updates user profile fields. A separate `EditUserPassword` query exists when the password is also being changed.
+
+```sql
+UPDATE SMX_OHEM
+SET firstName   = @firstName,
+    LastName    = @lastName,
+    Email       = @email,
+    U_Rol       = @U_Rol,
+    Active      = @Active,
+    Mobile      = @Mobile
+WHERE [User] = @User
+```
+
+</Accordion>
+
+<Accordion title="DeleteUser — Soft Delete">
+
+Users are never hard-deleted; `Active` is set to `0`.
+
+```sql
+UPDATE SMX_OHEM SET Active = 0 WHERE [User] = @User
+```
+
+</Accordion>
+
+<Accordion title="InsertNewVehicule — Register Vehicle">
+
+```sql
+INSERT INTO SMX_VHLS
+    ([CodigoInterno],[Placas],[Marca],[Modelo],[Anio],
+     [TipoVehiculo],[Estatus],[FechaAlta],[Observaciones])
+VALUES
+    (@CodigoInterno, @Placas, @Marca, @Modelo, @Anio,
+     @TipoVehiculo, @Estatus, GETDATE(), @Observaciones)
+```
+
+</Accordion>
+
+<Accordion title="InsertNewRuta — Create Route Header">
+
+Inserts into the legacy `SMX_HDRT` header table. For newer persistence, `RutasModel.GuardarRutaCompletaAsync()` writes directly to `SMX_RUTS` and `SMX_RDST` within a transaction.
+
+```sql
+INSERT INTO SMX_HDRT
+    (FolioRuta, FechaRuta, Zona, Estatus, IdVehiculo, IdOperador,
+     CapacidadVehiculo, CubicajeAsignado, DistanciaKm,
+     Observaciones, Activo, FechaRegistro, UsuarioRegistro)
+VALUES
+    (@FolioRuta, @FechaRuta, @Zona, @Estatus, @IdVehiculo, @IdOperador,
+     @CapacidadVehiculo, @CubicajeAsignado, @DistanciaKm,
+     @Observaciones, @Activo, @FechaRegistro, @UsuarioRegistro)
+```
+
+</Accordion>
+
+## SAP Business One — Read-Only Client Data
+
+The `SqlConSap` connection is used exclusively by `RutasModel.GetClientes()` and `GetClienteDetalle()`. It queries the `OCRD` table (business partners) across all four regional SAP company databases via a `UNION ALL`:
+
+```sql
+-- Queries/Queries.json — Rutas:GetClientes
+SELECT
+    RTRIM(LTRIM(LicTradNum)) AS LicTradNum,
+    RTRIM(LTRIM(MAX(CardName))) AS CardName
+FROM (
+    SELECT LicTradNum, CardName FROM SMXCDM_PROD.dbo.OCRD
+        WHERE CardType = 'C' AND LicTradNum IS NOT NULL AND LicTradNum <> ''
+    UNION ALL
+    SELECT LicTradNum, CardName FROM SMXMTY_PROD.dbo.OCRD
+        WHERE CardType = 'C' AND LicTradNum IS NOT NULL AND LicTradNum <> ''
+    UNION ALL
+    SELECT LicTradNum, CardName FROM SMXGDL_PROD.dbo.OCRD
+        WHERE CardType = 'C' AND LicTradNum IS NOT NULL AND LicTradNum <> ''
+    UNION ALL
+    SELECT LicTradNum, CardName FROM SMXGOT_PROD.dbo.OCRD
+        WHERE CardType = 'C' AND LicTradNum IS NOT NULL AND LicTradNum <> ''
+) T
+GROUP BY LicTradNum
+ORDER BY LicTradNum
+```
+
+The database name in `GetClienteDetalle` is interpolated from a **validated whitelist** to prevent SQL injection:
+
+```csharp
+// RutasModel.cs — whitelist guard before DB name interpolation
+var basesPermitidas = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+{
+    "SMXCDM_PROD", "SMXMTY_PROD", "SMXGDL_PROD", "SMXGOT_PROD"
+};
+
+if (!basesPermitidas.Contains(bd))
+{
+    Console.WriteLine($"BD no permitida: {bd}");
+    return dt;
+}
+
+var query = $"SELECT CardCode, CardName, Address, Phone1, CntctPrsn, City " +
+            $"FROM {bd}.dbo.OCRD WHERE LicTradNum = @LicTradNum";
+```
+
+## Migrating the In-Memory Route Store to SQL Server
+
+Currently, `IRutaRepository` is backed by `RutaRepositoryEnMemoria` — a `ConcurrentDictionary` that resets on every application restart. The tables `SMX_RUTS` and `SMX_RDST` are already created by `EnsureTablesCreatedAsync()` and `RutasModel.GuardarRutaCompletaAsync()` persists routes to them. The remaining step is to implement `IRutaRepository` against those tables and update the DI registration:
+
+```csharp
+// Program.cs — replace in-memory store with SQL-backed implementation:
+builder.Services.AddSingleton<IRutaRepository, RutaRepositorySQL>();
+```
+
+<Info>
+  `RutaRepositorySQL` must implement the three methods defined in `IRutaRepository`: `ObtenerPorId(int rutaId)`, `ObtenerTodas()`, and `GuardarNueva(RutaLogisticaRequest ruta)`. Because controllers and API endpoints depend only on the interface, no other code needs to change.
+</Info>
+
+The `IRutaRepository` contract is:
+
+```csharp
+// Services/Mapas/IRutaRepository.cs
+public interface IRutaRepository
+{
+    RutaLogisticaRequest? ObtenerPorId(int rutaId);
+    List<RutaLogisticaRequest> ObtenerTodas();
+    RutaLogisticaRequest GuardarNueva(RutaLogisticaRequest ruta);
+}
+```
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    Full request pipeline, DI registrations, and data-flow diagram.
+  </Card>
+  <Card title="Security" icon="shield" href="/architecture/security">
+    How connection strings are Base64-encoded and decoded at runtime.
+  </Card>
+  <Card title="Users Admin" icon="users" href="/admin/users">
+    CRUD operations on SMX_OHEM and SMX_MDAP.
+  </Card>
+  <Card title="Rutas Mapa API" icon="code" href="/api/rutas-mapa">
+    REST endpoints that read and write the route repository.
+  </Card>
+</CardGroup>

@@ -1,0 +1,180 @@
+---
+title: "Routes Module: Daily Route Cards and Assignments"
+sidebarTitle: "Routes"
+description: "Module 2 in Scan4. Displays one route card per day for the current 7-day window, with operator and vehicle assignment, status colours, and per-route destination tracking."
+---
+
+The Routes module is the operational heart of Scan4 — Pedidos Logística. Supervisors and operators use it to view the week's delivery schedule, assign drivers and vehicles, track route progress, and launch the interactive Route Builder or the New Route Request form. The view is served by `RutasController.Rutas()` and is protected by the same role/module-claim pattern used across the platform.
+
+## Access Control
+
+`RutasController.Rutas()` verifies that the user is role `1` (Admin) or holds the Module `"2"` claim. Operators (role `3`) see only their own routes; `IsOperador()` checks the role and, when true, scopes the `ObtenerRutas` query to the authenticated user's `EmpID`.
+
+```csharp
+// Controllers/RutasController.cs
+public async Task<IActionResult> Rutas()
+{
+    var userRol = User.FindFirst(ClaimTypes.Role)?.Value ?? "";
+    var hasRutas = userRol == "1" || User.HasClaim("Module", "2");
+
+    if (!hasRutas)
+        return RedirectToAction("SinAcceso", "Home");
+
+    ViewBag.GoogleMapsApiKey = _googleMapsOptions.ApiKey;
+    ViewBag.GoogleMapsMapId  = _googleMapsOptions.MapId;
+
+    DataSet ds = new DataSet();
+    DataTable dtOperadores = await _modelRutas.GetOperadores();
+    dtOperadores.TableName = "Operadores";
+    ds.Tables.Add(dtOperadores);
+
+    DataTable dtVehiculos = await _modelRutas.GetVehiculosDisponibles();
+    dtVehiculos.TableName = "Vehiculos";
+    ds.Tables.Add(dtVehiculos);
+
+    DataTable dtClientes = await _modelRutas.GetClientes();
+    dtClientes.TableName = "Clientes";
+    ds.Tables.Add(dtClientes);
+
+    return View(ds);
+}
+```
+
+The view receives a `DataSet` with three tables: **Operadores**, **Vehiculos**, and **Clientes** (from SAP). These populate the assignment dropdowns and the client auto-fill in the New Route Request form.
+
+## Daily Route Cards
+
+The client-side script `rutas2.js` generates one route card for each of the next **7 days** starting from today. Each card represents a single day's deliveries and shows a simulated destination list drawn from `CATALOGO_DESTINOS` — real CDMX coordinates that power the live map in the Route Builder.
+
+```javascript
+// wwwroot/js/rutas2.js — destination catalogue (real CDMX coordinates)
+const CATALOGO_DESTINOS = [
+    { nombre: 'Polanco',          lat: 19.4330, lng: -99.2000 },
+    { nombre: 'Santa Fe',         lat: 19.3590, lng: -99.2730 },
+    { nombre: 'Coyoacán',         lat: 19.3460, lng: -99.1610 },
+    { nombre: 'Xochimilco',       lat: 19.2570, lng: -99.1046 },
+    { nombre: 'Texcoco',          lat: 19.5039, lng: -98.8817 },
+    { nombre: 'Tlalpan',          lat: 19.2934, lng: -99.1671 },
+    { nombre: 'Iztapalapa',       lat: 19.3552, lng: -99.0642 },
+    { nombre: 'Nezahualcóyotl',   lat: 19.4004, lng: -99.0145 },
+    { nombre: 'Naucalpan',        lat: 19.4770, lng: -99.2380 },
+    { nombre: 'Cuajimalpa',       lat: 19.3630, lng: -99.2910 },
+    { nombre: 'Azcapotzalco',     lat: 19.4840, lng: -99.1860 },
+    { nombre: 'Iztacalco',        lat: 19.3950, lng: -99.0970 }
+];
+```
+
+### Destination counts per card
+
+| Day | Destination count |
+|-----|-------------------|
+| Today | Always **5** — Polanco, Santa Fe, Texcoco, Xochimilco, + one random from the catalogue |
+| All other days | **3 – 5** randomly drawn from `CATALOGO_DESTINOS` |
+
+<Note>
+  These are simulated destinations. When the SQL Server schema is extended with a pending-requests table, `rutas2.js` will replace the catalogue with real solicitudes filtered by date. See [Architecture: Database](/architecture/database) for the migration roadmap.
+</Note>
+
+## Card Fields
+
+Each card surfaces the following information at a glance:
+
+<CardGroup cols={2}>
+  <Card title="Zone" icon="map-pin">
+    The delivery zone (Norte, Centro, or Sur) assigned to the day's route.
+  </Card>
+  <Card title="Operator" icon="user">
+    The assigned driver's name. Displays **"Por asignar"** for days whose status is `pendiente`.
+  </Card>
+  <Card title="Vehicle" icon="truck">
+    The vehicle unit name and its cargo capacity in m³.
+  </Card>
+  <Card title="Status & Progress" icon="chart-bar">
+    A coloured status badge and a progress bar showing completed vs. total stops.
+  </Card>
+</CardGroup>
+
+## Route Status Colours
+
+```javascript
+// wwwroot/js/rutas2.js
+const STATUS = {
+    ejecucion: { text: 'En ejecución', badge: 'badge-success', color: 'green'  },
+    programada: { text: 'Programada',  badge: 'badge-info',    color: 'blue'   },
+    pausa:      { text: 'En pausa',    badge: 'badge-warning', color: 'amber'  },
+    pendiente:  { text: 'Pendiente',   badge: 'badge-muted',   color: 'gray'   },
+    completada: { text: 'Completada',  badge: 'badge-success', color: 'gray'   }
+};
+```
+
+Today's card always starts in **En ejecución** (green). The remaining cards rotate through Programada → En pausa → Pendiente cyclically so there is always a visual variety across the week. Once a route is finalised through the API it moves to **Completada**.
+
+## Route Data Endpoints
+
+### Get live routes from the database
+
+```http
+GET /Rutas/ObtenerRutas
+```
+
+Returns all routes from `LOG_Rutas` joined with their stops from `LOG_Rutas_Destinos`. When the authenticated user is an Operator (role `3`), the query is automatically scoped to that operator's `EmpID`. The response feeds `rutas2.js`; if the database returns at least one route, the simulated cards are replaced with real data.
+
+### Get SAP client detail for auto-fill
+
+```http
+GET /Rutas/GetClienteDetalle?bd={database}&rfc={rfc}
+```
+
+Selecting a client in the Nueva Ruta form fires this endpoint to fill the address, phone, and contact fields automatically. The `bd` parameter must be one of the four SAP company databases:
+
+<Tabs>
+  <Tab title="SMXCDM_PROD">
+    ScanMex Ciudad de México production database.
+  </Tab>
+  <Tab title="SMXMTY_PROD">
+    ScanMex Monterrey production database.
+  </Tab>
+  <Tab title="SMXGDL_PROD">
+    ScanMex Guadalajara production database.
+  </Tab>
+  <Tab title="SMXGOT_PROD">
+    ScanMex Querétaro (Goterón) production database.
+  </Tab>
+</Tabs>
+
+Example response:
+
+```json
+{
+  "cardCode": "C00123",
+  "cardName": "Distribuidora Norte S.A.",
+  "address": "Av. Insurgentes Sur 1234, Col. del Valle, CDMX",
+  "phone": "+52 55 1234 5678",
+  "contact": "Lic. Pérez",
+  "city": "Ciudad de México"
+}
+```
+
+### Additional route management endpoints
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `POST` | `/Rutas/GuardarRuta` | Saves a new route with destinations to `LOG_Rutas` |
+| `POST` | `/Rutas/ReasignarOperador` | Reassigns an operator to an existing route |
+| `POST` | `/Rutas/ReprogramarFecha` | Changes the scheduled date of a route |
+| `POST` | `/Rutas/FinalizarRuta` | Marks a route and all its deliveries as completed |
+
+<Warning>
+  The `GuardarRuta`, `ReasignarOperador`, `ReprogramarFecha`, and `FinalizarRuta` endpoints return `403 Forbidden` when called by an Operator (role `3`). Only Admin or Supervisor roles may modify route data.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Route Builder" icon="route" href="/features/route-builder">
+    Open the Armar Ruta modal from any daily card to build, visualise, and commit the route.
+  </Card>
+  <Card title="New Route Request" icon="plus" href="/features/new-route-request">
+    Register a single delivery or pickup address with geocoding and cubicage data.
+  </Card>
+</CardGroup>

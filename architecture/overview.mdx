@@ -1,0 +1,161 @@
+---
+title: "System Architecture: ASP.NET Core MVC Logistics Platform"
+sidebarTitle: "Overview"
+description: "Layered architecture of Scan4: MVC controllers, service abstractions, in-memory vs SQL Server data paths, DI registrations, and the full request pipeline."
+---
+
+Scan4 — Pedidos Logística is built on **ASP.NET Core 8 MVC** and follows a classic layered architecture: HTTP requests enter a middleware pipeline, pass through MVC controllers, delegate data access to typed Model classes and service interfaces, and return Razor views or JSON responses. Two separate SQL Server connections feed logistics data (SMXLOG) and SAP Business One client data, while route-building state is currently held in a Singleton in-memory repository that can be swapped for a SQL-backed implementation without touching any controller or front-end code.
+
+## Request Pipeline
+
+Every request travels through the middleware pipeline in this exact order:
+
+<Steps>
+  <Step title="HTTPS Redirection">
+    `UseHttpsRedirection()` — enforces TLS and issues 301 redirects for plain-HTTP requests in production. HSTS is also enabled outside of Development.
+  </Step>
+  <Step title="Static Files">
+    `UseStaticFiles()` — serves CSS, JS, images, and other assets directly from `wwwroot` without invoking MVC. Scripts use `asp-append-version="true"` for cache-busting.
+  </Step>
+  <Step title="Routing">
+    `UseRouting()` — matches the URL to the default MVC route pattern: `{controller=Home}/{action=Index}/{id?}`.
+  </Step>
+  <Step title="Session">
+    `UseSession()` — attaches the `ISession` store; an HttpOnly, essential cookie carries the session identifier with an 8-hour idle timeout.
+  </Step>
+  <Step title="Authentication">
+    `UseAuthentication()` — reads the cookie set by `CookieAuthenticationDefaults.AuthenticationScheme` and populates `HttpContext.User` with the stored claims.
+  </Step>
+  <Step title="Authorization">
+    `UseAuthorization()` — evaluates `[Authorize]` attributes and policy requirements. Unauthenticated requests are redirected to `/Home/Index`.
+  </Step>
+  <Step title="MVC Controller">
+    The matched controller action runs, calls the appropriate Model or Service, and returns a `ViewResult` or `JsonResult`.
+  </Step>
+</Steps>
+
+## Architectural Layers
+
+<CardGroup cols={2}>
+  <Card title="Controllers" icon="server">
+    **MVC Controllers** (`HomeController`, `DashboardController`, `RutasController`, `UsuariosController`, `ConfiguracionController`) handle page rendering and form submissions.
+
+    **API Controllers** (`RutasMapaController`, `SolicitudesRutaController`) expose JSON endpoints consumed by client-side JavaScript inside Razor views.
+  </Card>
+  <Card title="Models (Data Access)" icon="database">
+    Scoped classes (`HomeModel`, `RutasModel`, `UsuariosModel`, `ConfiguracionModel`) open `SqlConnection` directly via `Microsoft.Data.SqlClient`, execute parameterized queries loaded from `Queries/Queries.json`, and return `DataTable` results.
+  </Card>
+  <Card title="Services (Abstractions)" icon="layer-group">
+    `IRutaRepository` / `RutaRepositoryEnMemoria` — stores and retrieves assembled route objects.
+
+    `IFolioGenerador` / `FolioGeneradorEnMemoria` — generates sequential folio numbers (`ENT-000401`, `REC-000402`, …) for route requests.
+  </Card>
+  <Card title="Helpers" icon="wrench">
+    `SecurityHelper` — Base64 encode/decode for connection strings and the Google Maps API key.
+
+    `ConfigurationExtensions` — `GetDecryptedConnectionString(key)` reads and decodes a named connection string in one call.
+  </Card>
+  <Card title="Views (Razor)" icon="window">
+    Strongly-typed `.cshtml` views use tag helpers, `ViewBag`, and partial views. Client-side interactivity is handled by vanilla JS files (`rutas2.js`, `armar-ruta-mapa.js`, `nueva-ruta-integracion.js`) loaded with the Maps JavaScript API.
+  </Card>
+  <Card title="Configuration" icon="sliders">
+    Settings flow from `appsettings.json` → `Queries/Queries.json` → `GoogleMaps/GoogleMaps.json` → .NET User Secrets (Development only). Each layer can override the previous one; secrets always win.
+  </Card>
+</CardGroup>
+
+## Dependency Injection Registrations
+
+All registrations live in `Program.cs`. The table below maps each service to its lifetime and concrete type:
+
+| Service / Interface | Concrete Type | Lifetime |
+|---|---|---|
+| `UsuariosModel` | — | **Scoped** |
+| `HomeModel` | — | **Scoped** |
+| `RutasModel` | — | **Scoped** |
+| `ConfiguracionModel` | — | **Scoped** |
+| `IRutaRepository` | `RutaRepositoryEnMemoria` | **Singleton** |
+| `IFolioGenerador` | `FolioGeneradorEnMemoria` | **Singleton** |
+| `IOptions<GoogleMapsOptions>` | Configured inline | **Singleton** |
+| Cookie Auth scheme | `CookieAuthenticationDefaults` | Framework |
+| `ISession` | In-memory / distributed | Framework |
+
+```csharp
+// Program.cs — service registrations (abridged)
+builder.Services.AddScoped<UsuariosModel>();
+builder.Services.AddScoped<HomeModel>();
+builder.Services.AddScoped<RutasModel>();
+builder.Services.AddScoped<ConfiguracionModel>();
+
+builder.Services.AddSingleton<IRutaRepository, RutaRepositoryEnMemoria>();
+builder.Services.AddSingleton<IFolioGenerador, FolioGeneradorEnMemoria>();
+
+builder.Services.Configure<GoogleMapsOptions>(options =>
+{
+    var rawKey = builder.Configuration["GoogleMaps:ApiKey"] ?? "";
+    options.ApiKey = SecurityHelper.Desencriptar(rawKey);
+    options.MapId  = builder.Configuration["GoogleMaps:MapId"] ?? "";
+});
+```
+
+## Data Flow: UI → Controller → Data Layer → Database
+
+The diagram below traces a typical "save route" request from the browser to the database:
+
+| Step | Component | Detail |
+|---|---|---|
+| 1 | Browser (`armar-ruta-mapa.js`) | `POST /api/rutas-mapa` with JSON body (`RutaLogisticaRequest`) |
+| 2 | `RutasMapaController.CrearRuta()` | Validates model state; calls `IRutaRepository.GuardarNueva()` |
+| 3 | `RutaRepositoryEnMemoria` | Assigns a sequential ID; stores in `ConcurrentDictionary<int, RutaLogisticaRequest>` |
+| 4 | Response | Returns `201 Created` with the saved route JSON; JS updates the dashboard card |
+
+For **user and vehicle CRUD**, the flow continues to SQL Server:
+
+| Step | Component | Detail |
+|---|---|---|
+| 1 | MVC Controller action | Calls `UsuariosModel` or `ConfiguracionModel` method |
+| 2 | Model class | Reads query from `IConfiguration["Queries:InsertNewUser"]`; opens `SqlConnection` via `GetDecryptedConnectionString("SqlCon")` |
+| 3 | SMXLOG SQL Server | Executes parameterized `INSERT` / `UPDATE` / `SELECT` |
+| 4 | `DataTable` returned | Controller converts to `ViewBag` or JSON for the view |
+
+## Database Connections
+
+The application maintains two named connection strings, both stored as Base64 in `appsettings.json` and decoded at runtime:
+
+<CardGroup cols={2}>
+  <Card title="SqlCon — SMXLOG" icon="table">
+    The primary logistics database. Contains users (`SMX_OHEM`), vehicles (`SMX_VHLS`), module assignments (`SMX_MDAP`), catalogue values (`SMX_CATT`), and persisted routes (`SMX_RUTS`, `SMX_RDST`).
+  </Card>
+  <Card title="SqlConSap — SAP B1" icon="building">
+    Read-only SAP Business One instance. Queried across four company databases — `SMXCDM_PROD`, `SMXMTY_PROD`, `SMXGDL_PROD`, `SMXGOT_PROD` — for RFC-based client auto-fill via the `OCRD` table.
+  </Card>
+</CardGroup>
+
+## In-Memory Route Store
+
+`RutaRepositoryEnMemoria` is registered as a Singleton backed by a `ConcurrentDictionary`. It seeds a demo route (ID `1001`) at startup so the map view works without any prior data.
+
+<Note>
+  Routes stored in `RutaRepositoryEnMemoria` are lost when the application restarts. To persist routes to SQL Server, implement `IRutaRepository` against the `SMX_RUTS` / `SMX_RDST` tables and swap the registration in `Program.cs`. No controller or front-end code needs to change.
+</Note>
+
+```csharp
+// Program.cs — swap the in-memory store for SQL Server persistence:
+builder.Services.AddSingleton<IRutaRepository, RutaRepositorySQL>();
+```
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="Database" icon="database" href="/architecture/database">
+    SQL Server tables, key queries from Queries.json, and the migration path for the in-memory store.
+  </Card>
+  <Card title="Google Maps" icon="map" href="/architecture/google-maps">
+    Maps JavaScript API setup, server-side Routes API call, and API key configuration.
+  </Card>
+  <Card title="Security" icon="shield" href="/architecture/security">
+    Cookie auth, RBAC claims, Base64 credential handling, and User Secrets.
+  </Card>
+  <Card title="Route Builder" icon="route" href="/features/route-builder">
+    End-user guide to assembling and saving a logistics route on the map.
+  </Card>
+</CardGroup>

@@ -1,0 +1,108 @@
+{
+  "projectType": "saas",
+  "projectName": "Scan4 — Pedidos Logística",
+  "projectDescription": "An ASP.NET Core MVC web application for logistics route management, built for ScanMex, featuring route planning with Google Maps integration, package cubicage, SAP client data, and role-based access control.",
+  "theme": "luma",
+  "primaryColor": "#1A56DB",
+  "lightColor": "#EFF6FF",
+  "darkColor": "#1E3A5F",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "configuration"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/dashboard",
+              "features/routes",
+              "features/route-builder",
+              "features/new-route-request",
+              "features/reports"
+            ]
+          },
+          {
+            "group": "Administration",
+            "pages": [
+              "admin/users",
+              "admin/vehicles",
+              "admin/roles-permissions"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/database",
+              "architecture/google-maps",
+              "architecture/security"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Routes API",
+            "pages": [
+              "api/rutas-mapa",
+              "api/solicitudes-ruta",
+              "api/rutas-controller"
+            ]
+          },
+          {
+            "group": "Data Models",
+            "pages": [
+              "api/models/ruta-logistica",
+              "api/models/destino-logistico",
+              "api/models/solicitud-ruta"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Interactive route planning with Google Maps DirectionsService and real traffic data",
+    "Daily route cards grouped by day of week with simulated delivery destinations",
+    "Drag-and-drop destination grid for building routes with checkbox selection",
+    "New route request form with real address geocoding and route distance/time calculation",
+    "Package cubicage (volume) calculator for envelope, box, and pallet shipments",
+    "AI route suggestion stub (POST /api/rutas-mapa/sugerir) ready for LLM integration",
+    "Role-based access control (Administrator, Supervisor, Operator) with module-level permissions",
+    "SAP Business One client data auto-fill from multiple company databases (CDMX, MTY, GDL, Bajío)",
+    "Cookie-based authentication with 8-hour sliding expiration",
+    "In-memory route repository (IRutaRepository) with SQL Server migration path via dependency injection",
+    "Base64-encoded credential obfuscation with User Secrets support for local development",
+    "Folio generation for route requests (REC-XXXXXX / ENT-XXXXXX format)"
+  ],
+  "publicApiSurface": [
+    "GET  /api/rutas-mapa — list all saved routes",
+    "GET  /api/rutas-mapa/{rutaId} — get a route by ID",
+    "POST /api/rutas-mapa — create (save) a new route",
+    "POST /api/rutas-mapa/sugerir — AI route suggestion stub",
+    "POST /api/solicitudes-ruta/simular — simulate a new route request and generate folio",
+    "GET  /Rutas/ObtenerRutas — list all routes from DB (with operator filter for Operador role)",
+    "POST /Rutas/GuardarRuta — persist a full route with destinations to SQL Server",
+    "POST /Rutas/ReasignarOperador — reassign a route's operator",
+    "POST /Rutas/ReprogramarFecha — reschedule a route's date",
+    "POST /Rutas/FinalizarRuta — mark a route as finished",
+    "GET  /Rutas/GetClienteDetalle?bd=&rfc= — SAP client detail auto-fill",
+    "GET  /Usuarios/GetModulosUsuario?usuario= — get assigned modules for a user",
+    "POST /Usuarios/CreateUser — create a new platform user",
+    "POST /Usuarios/EditUser — update a user's profile",
+    "GET  /Usuarios/DeleteUser?id= — soft-delete (deactivate) a user",
+    "POST /Configuracion/CreateVehiculo — register a new vehicle",
+    "POST /Configuracion/EditVehicule — update a vehicle record",
+    "GET  /Configuracion/DeleteVehiculo?id= — soft-delete a vehicle"
+  ]
+}

@@ -1,0 +1,175 @@
+---
+title: "New Route Request: Geocoding and Cubicage Calculator"
+sidebarTitle: "New Route Request"
+description: "The Nueva Ruta modal lets users register a single pickup or delivery address. It geocodes the destination, calculates a real route from the ScanMex office, and computes package volume."
+---
+
+The **Nueva Ruta** modal is accessed from the Routes view via the **Nueva ruta** button. It registers a single delivery or pickup address as a route request, geocodes the destination in the browser, calculates the actual driving distance and time from the ScanMex distribution centre, and collects package cubicage data. The entire workflow is handled client-side by `nueva-ruta-integracion.js` and `paquetes-cubicaje.js`; the form submits to `/Rutas/GuardarRuta` once all required fields are filled.
+
+## Fixed Origin
+
+All routes calculated in this form start from the ScanMex headquarters:
+
+```javascript
+// wwwroot/js/nueva-ruta-integracion.js
+const SCANMEX_ORIGIN = {
+    direccion: "San Francisco 1107, Col del Valle Centro, Benito Juárez, 03100 Benito Juárez, CDMX",
+    lat: 19.3850961,
+    lng: -99.1770148
+};
+```
+
+The origin marker is rendered as a dark-blue **O** circle on the map and cannot be changed by the user.
+
+## Address Geocoding
+
+When the user types or pastes an address into the **Dirección** field and moves focus away, `NuevaRutaMapa.geocodificarDireccion()` resolves the coordinates using a three-level fallback chain:
+
+<Steps>
+  <Step title="Google Places TextSearch">
+    The primary strategy. Uses `google.maps.places.PlacesService.textSearch()` to find the address within Mexico. The address string is cleaned first (removes interior/exterior number markers, lot numbers, etc.) to improve match quality.
+  </Step>
+  <Step title="Nominatim OSM">
+    If Google Places returns no result, a request is sent to `https://nominatim.openstreetmap.org/search` with `countrycodes=mx`. No API key required.
+  </Step>
+  <Step title="City/state fallback">
+    If neither service resolves the full address, the last comma-separated segment is sent back to Google TextSearch as a city or state query.
+  </Step>
+  <Step title="CDMX random fallback">
+    As a last resort, a coordinate within the CDMX bounding box is used so the map always renders something meaningful.
+  </Step>
+</Steps>
+
+Once coordinates are obtained, `trazarRutaScanMexADestino()` calls `DirectionsService` to draw the real road path and populate the **Distancia** and **Duración** fields in the modal.
+
+## Client Auto-Fill
+
+Selecting a client from the SAP customer dropdown triggers a call to `GET /Rutas/GetClienteDetalle` which fills the address, phone, and contact fields automatically:
+
+```javascript
+// Triggered when the client dropdown value changes
+GET /Rutas/GetClienteDetalle?bd=SMXCDM_PROD&rfc=ABC123456XYZ
+```
+
+The `bd` parameter selects the SAP company database (SMXCDM\_PROD, SMXMTY\_PROD, SMXGDL\_PROD, or SMXGOT\_PROD). See [Routes Module](/features/routes) for the full list of available databases.
+
+## Form Fields
+
+<Accordion title="All form fields">
+  <ParamField body="cliente" type="string" required>
+    Customer name. Selected from the SAP Clientes dropdown; can also be typed manually.
+  </ParamField>
+  <ParamField body="tipo" type="string" required>
+    Service type. Either `Recolección` (pickup) or `Entrega` (delivery). Determines the folio prefix.
+  </ParamField>
+  <ParamField body="zona" type="string" required>
+    Delivery zone (Norte, Centro, Sur).
+  </ParamField>
+  <ParamField body="vehiculo" type="integer">
+    Vehicle ID selected from the available vehicles list loaded by `GetVehiculosDisponibles()`.
+  </ParamField>
+  <ParamField body="operador" type="integer">
+    Operator ID selected from the operators list loaded by `GetOperadores()`.
+  </ParamField>
+  <ParamField body="prioridad" type="string">
+    Priority level: `Alta`, `Media`, or `Baja`.
+  </ParamField>
+  <ParamField body="fecha" type="string" required>
+    Scheduled service date in `yyyy-MM-dd` format.
+  </ParamField>
+  <ParamField body="hora" type="string">
+    Scheduled service time window (start and end, e.g., `09:00 - 11:00`).
+  </ParamField>
+  <ParamField body="direccion" type="string" required>
+    Full delivery address. Geocoded automatically on blur.
+  </ParamField>
+  <ParamField body="observaciones" type="string">
+    Free-text delivery instructions passed through to the driver.
+  </ParamField>
+</Accordion>
+
+## Package Cubicage Sub-Form
+
+The lower section of the modal is powered by `paquetes-cubicaje.js` and allows the user to add one or more package items before submitting the request. Each item captures type, dimensions, and quantity; volume is computed entirely in the browser.
+
+```javascript
+// wwwroot/js/paquetes-cubicaje.js — volume calculation per item
+const cubicajeCm3 = largo * ancho * alto * cantidad;
+```
+
+### Package item fields
+
+<ParamField body="tipo" type="string" required>
+  Package type: `Sobre` (envelope), `Caja` (box), or `Tarima` (pallet).
+</ParamField>
+<ParamField body="largoCm" type="number" required>
+  Length in centimetres. Must be greater than zero.
+</ParamField>
+<ParamField body="anchoCm" type="number" required>
+  Width in centimetres. Must be greater than zero.
+</ParamField>
+<ParamField body="altoCm" type="number" required>
+  Height in centimetres. Must be greater than zero.
+</ParamField>
+<ParamField body="cantidad" type="integer" required>
+  Number of units. Must be a positive integer ≥ 1.
+</ParamField>
+
+The total bultos count and total volume (shown in cm³ and m³) update live as items are added or removed. Pressing **Enter** in any dimension field triggers the same **Agregar** action as clicking the button.
+
+## Request / Response
+
+On submit the form POSTs to `/Rutas/GuardarRuta` with the full route payload including cubicage data. The shape of that payload mirrors the `SolicitudRutaRequest` model used by the simulation endpoint:
+
+```json
+// POST /Rutas/GuardarRuta  — request body
+{
+  "codigoRuta": "DEST-493021",
+  "nombreRuta": "Entrega Distribuidora Norte",
+  "fechaRuta": "2026-07-10",
+  "idOperador": 4,
+  "idVehiculo": 2,
+  "origenDireccion": "San Francisco 1107, Col del Valle Centro, Benito Juárez, 03100 Benito Juárez, CDMX",
+  "origenLat": 19.3850961,
+  "origenLng": -99.1770148,
+  "distanciaKm": 8.3,
+  "tiempoEstimadoMin": 24,
+  "destinos": [
+    {
+      "ordenSecuencia": 1,
+      "cardCode": "C00123",
+      "cardName": "Distribuidora Norte S.A.",
+      "licTradNum": "DNO123456ABC",
+      "address": "Av. Insurgentes Sur 1234, Col. del Valle, CDMX",
+      "phone1": "+52 55 1234 5678",
+      "cntctPrsn": "Lic. Pérez",
+      "city": "Ciudad de México",
+      "latitud": 19.3720,
+      "longitud": -99.1680,
+      "tipoDocumento": "Factura",
+      "prioridad": "Media",
+      "fechaCompromiso": "2026-07-10",
+      "horarioEntrega": "09:00 - 11:00",
+      "observaciones": "Presentarse con el Lic. Pérez en recepción."
+    }
+  ]
+}
+```
+
+A successful save returns the route's assigned code:
+
+```json
+// 200 OK — response body
+{
+  "exito": true,
+  "idRuta": 42,
+  "codigoRuta": "DEST-493021",
+  "mensaje": "Ruta guardada exitosamente."
+}
+```
+
+After receiving a success response, the form clears all fields, removes the destination map marker, and triggers `NuevaRutaDashboard.cargarRutasDesdeBD()` to refresh the route cards in the background.
+
+<Note>
+  The legacy simulation endpoint `POST /api/solicitudes-ruta/simular` generates a folio (**REC-XXXXXX** for pickups, **ENT-XXXXXX** for deliveries) and echoes back the cubicage payload without persisting anything to the database. This endpoint is used only in demonstration flows. The production path through `/Rutas/GuardarRuta` writes to `LOG_Rutas` and `LOG_Rutas_Destinos`.
+</Note>

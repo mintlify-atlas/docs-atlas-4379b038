@@ -1,20 +1,74 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Scan4 — Pedidos Logística"
+sidebarTitle: "Home"
+description: "Logistics route management for ScanMex. Plan, assign, and track delivery routes with Google Maps, SAP client data, and role-based access control."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Scan4 is the internal logistics platform for **ScanMex**, built on ASP.NET Core 8. It centralises route planning, vehicle and operator assignment, package cubicage calculation, and delivery tracking in a single web application connected to your SQL Server and SAP Business One data.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Learn what Scan4 does, who it is for, and how the modules fit together.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Clone, configure, and run the app locally in under 10 minutes.
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Connection strings, Google Maps API key, and User Secrets setup.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/rutas-mapa">
+    REST endpoints for routes, solicitudes, operators, and vehicles.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## What Scan4 covers
+
+<CardGroup cols={3}>
+  <Card title="Route Planning" icon="map" href="/features/routes">
+    Daily route cards grouped by day of week. Assign operators, vehicles, and destinations with a live Google Maps view.
+  </Card>
+  <Card title="Route Builder" icon="route" href="/features/route-builder">
+    Interactive modal with a destination grid and real-time DirectionsService. Includes an AI suggestion hook.
+  </Card>
+  <Card title="New Route Request" icon="circle-plus" href="/features/new-route-request">
+    Geocode a single delivery address, calculate distance and time, and capture package cubicage before submitting.
+  </Card>
+  <Card title="Dashboard" icon="gauge" href="/features/dashboard">
+    KPI cards and summary views for supervisors and administrators.
+  </Card>
+  <Card title="Users & Roles" icon="users" href="/admin/users">
+    Role-based access control with module-level permissions for Administrators, Supervisors, and Operators.
+  </Card>
+  <Card title="Fleet Management" icon="truck" href="/admin/vehicles">
+    Register, edit, and deactivate vehicles in the SMX_VHLS table.
+  </Card>
+</CardGroup>
+
+## Getting started
+
+<Steps>
+  <Step title="Clone the repository and restore dependencies">
+    ```bash
+    git clone https://github.com/aloncm/scan4.git
+    cd scan4
+    dotnet restore
+    ```
+  </Step>
+  <Step title="Configure your database connection and Google Maps key">
+    Store secrets with the .NET User Secrets manager — never commit credentials to source control.
+    ```bash
+    dotnet user-secrets set "ConnectionStrings:SqlCon" "<base64-encoded-connection-string>"
+    dotnet user-secrets set "GoogleMaps:ApiKey" "<base64-encoded-api-key>"
+    ```
+    See the [Configuration guide](/configuration) for the full setup.
+  </Step>
+  <Step title="Run the application">
+    ```bash
+    dotnet run
+    ```
+    Navigate to `https://localhost:5001` and log in with an account that exists in your `SMX_OHEM` table.
+  </Step>
+  <Step title="Explore the modules">
+    After login you are redirected to the first module your role has access to. Administrators land on the Dashboard; other roles land on their first permitted module.
+  </Step>
+</Steps>

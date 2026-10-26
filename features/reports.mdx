@@ -1,0 +1,85 @@
+---
+title: "Reports Module: Logistics Activity Overview"
+sidebarTitle: "Reports"
+description: "Module 3 in Scan4. Gives Admin users and authorised supervisors a reporting surface for completed routes, distances covered, and operator performance metrics."
+---
+
+The Reports module provides a logistics activity overview for supervisors and administrators. It serves as the dedicated space for reviewing historical route data, measuring operator performance, and analysing delivery patterns across zones and time periods. Like every module in Scan4, access is enforced server-side by a role and claim check before the view is rendered.
+
+## Access Control
+
+`DashboardController.Reportes()` allows access to users who are either **role `1`** (Admin) or carry a **Module claim with value `"3"`**. Any other authenticated user is redirected to the `SinAcceso` page.
+
+```csharp
+// Controllers/DashboardController.cs
+public IActionResult Reportes()
+{
+    var userRol = User.FindFirst(ClaimTypes.Role)?.Value ?? "";
+    var hasReportes = userRol == "1" || User.HasClaim("Module", "3");
+
+    if (!hasReportes)
+    {
+        return RedirectToAction("SinAcceso", "Home");
+    }
+
+    ViewBag.Seccion = "Reportes";
+    return View();
+}
+```
+
+<Info>
+  If a user navigates directly to `/Dashboard/Reportes` without the Module `"3"` claim (and is not Admin), the controller issues a redirect to `/Home/SinAcceso` — no data is ever exposed. To grant Reportes access to a non-admin user, add the Module `"3"` claim through the Users admin panel. See [Roles & Permissions](/admin/roles-permissions) for step-by-step instructions.
+</Info>
+
+## What the Reports Surface Covers
+
+The Reportes view is designed to aggregate data from the `LOG_Rutas` and `LOG_Rutas_Destinos` tables and present it as readable summaries. The primary reporting dimensions are:
+
+<CardGroup cols={2}>
+  <Card title="Routes Completed" icon="check-circle">
+    Count of routes whose status reached **Completada** within a given date range, broken down by zone and operator.
+  </Card>
+  <Card title="Distance Covered" icon="map">
+    Total kilometres driven across all completed routes, useful for fuel cost estimation and SLA compliance.
+  </Card>
+  <Card title="Operator Performance" icon="user-check">
+    Per-operator metrics including routes completed, average delivery time, and rescheduled destination rate.
+  </Card>
+  <Card title="Cubicage Utilisation" icon="cube">
+    Vehicle capacity utilisation across routes, highlighting over- and under-loaded trips.
+  </Card>
+</CardGroup>
+
+## Reporting Filters
+
+The Reportes view includes filter controls for date range, zone, operator, and vehicle. These UI elements are in place and styled consistently with the Dashboard KPI surface.
+
+<Note>
+  Detailed reporting filters and their underlying data queries are reserved for a future implementation milestone — the same note applies to the KPI filter controls on the [Dashboard](/features/dashboard). The filter UI is already rendered; it will be wired to live SQL aggregation queries in the next reporting release.
+</Note>
+
+## Relationship to the Dashboard
+
+The Dashboard (Module 1) shows real-time KPI tiles for the current day's operational state. The Reports module complements it with **historical** data — completed routes, trends over time, and performance summaries that require aggregated queries rather than live lookups.
+
+<Accordion title="Redirect waterfall from the Dashboard">
+  When a user logs in without Dashboard access but holds Module `"3"`, `DashboardController.Index()` automatically redirects them to `/Dashboard/Reportes` as the next available module in the waterfall (after checking for Module `"2"` / Rutas). This means pure reporting users land directly on the Reports page without needing a custom login redirect.
+</Accordion>
+
+## Granting Reportes Access
+
+Module claims are managed in the **Usuarios** admin panel. To give a logistics analyst access to the Reports module without granting full Admin rights:
+
+<Steps>
+  <Step title="Open Users admin">
+    Navigate to **Administración → Usuarios** and find the target user.
+  </Step>
+  <Step title="Edit module claims">
+    In the user's claim configuration, add a **Module** claim with value `3`.
+  </Step>
+  <Step title="Save and verify">
+    Save the changes. The user can now log in and will land on `/Dashboard/Reportes` if they do not also hold Module `1` or `2` claims.
+  </Step>
+</Steps>
+
+For a full explanation of how role and module claims interact, see [Roles & Permissions](/admin/roles-permissions).

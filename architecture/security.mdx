@@ -1,0 +1,286 @@
+---
+title: "Authentication, Sessions, and Credential Security"
+sidebarTitle: "Security"
+description: "Cookie-based auth flow, RBAC claims issued at login, Base64 credential obfuscation in SecurityHelper, and best practices for User Secrets and production key management."
+---
+
+Scan4 uses ASP.NET Core's cookie authentication scheme for login sessions and a claim-based role and module model for access control. Sensitive values — connection strings, the Google Maps API key, and user passwords stored in the database — are Base64-encoded to prevent accidental plain-text exposure in config files and SQL snapshots. This page documents how each security mechanism works and what to replace before moving to a production environment.
+
+## Cookie Authentication
+
+Authentication is configured in `Program.cs` using `CookieAuthenticationDefaults.AuthenticationScheme`:
+
+```csharp
+// Program.cs — cookie authentication configuration
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.LoginPath        = "/Home/Index";
+        options.LogoutPath       = "/Home/Logout";
+        options.AccessDeniedPath = "/Home/Index";
+        options.ExpireTimeSpan   = TimeSpan.FromHours(8);
+        options.SlidingExpiration = true;
+        options.Cookie.HttpOnly  = true;
+        options.Cookie.IsEssential = true;
+    });
+```
+
+Key behaviors:
+
+- **Sliding expiration** — the 8-hour timer resets on every authenticated request, so active users are not logged out mid-shift.
+- **HttpOnly** — the cookie cannot be read by JavaScript, protecting against XSS-based session theft.
+- **IsEssential** — the cookie is stored even when the user has not accepted a cookie consent banner (required for the app to function).
+- **Unauthenticated / access-denied** — both redirect to `/Home/Index` (the login page); no separate "access denied" view is shown.
+
+## Claims Issued at Login
+
+When `HomeController.Index(POST)` successfully validates credentials, it builds a `ClaimsPrincipal` with the following claims before calling `HttpContext.SignInAsync()`:
+
+| Claim Type | Value | Source |
+|---|---|---|
+| `ClaimTypes.Name` | Username (login name) | `SMX_OHEM.User` |
+| `ClaimTypes.Role` | Role code (`'1'`, `'2'`, or `'3'`) | `SMX_OHEM.U_Rol` |
+| `"RolName"` | Human-readable role | Computed from `U_Rol` or `GetUser` result |
+| `"EmpID"` | Employee ID | `SMX_OHEM.empID` |
+| `"Module"` | Module ID (one claim per module) | `SMX_MDAP.ID_MODULE` |
+
+Administrators (role `'1'`) receive all five module claims automatically — no database lookup is performed for them:
+
+```csharp
+// HomeController.cs — claims construction (abridged)
+var claims = new List<Claim>
+{
+    new Claim(ClaimTypes.Name,  usuario),
+    new Claim(ClaimTypes.Role,  rol),
+    new Claim("RolName",        rolName),
+    new Claim("EmpID",          empID)
+};
+
+if (rol == "1")
+{
+    // Administrators get all modules without a DB query
+    claims.Add(new Claim("Module", "1"));
+    claims.Add(new Claim("Module", "2"));
+    claims.Add(new Claim("Module", "3"));
+    claims.Add(new Claim("Module", "4"));
+    claims.Add(new Claim("Module", "5"));
+}
+else
+{
+    DataTable dtModulos = await _modelHome.GetUserModules(usuario, empID);
+    foreach (DataRow row in dtModulos.Rows)
+        claims.Add(new Claim("Module", row["ID_MODULE"].ToString()));
+}
+
+var identity  = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
+var principal = new ClaimsPrincipal(identity);
+
+await HttpContext.SignInAsync(
+    CookieAuthenticationDefaults.AuthenticationScheme,
+    principal,
+    new AuthenticationProperties
+    {
+        IsPersistent = false,
+        ExpiresUtc   = DateTimeOffset.UtcNow.AddHours(8)
+    });
+```
+
+After sign-in, the first available module determines the landing page (`Dashboard`, `Rutas`, `Reportes`, `Perfil`, or `Configuracion`). Users with no module assignments are sent to the `SinAcceso` view.
+
+## SecurityHelper — Base64 Encoding
+
+`SecurityHelper` in `Helpers/SecurityHelper.cs` provides the encode/decode pair used for connection strings, the Google Maps API key, and stored passwords:
+
+```csharp
+// Helpers/SecurityHelper.cs
+public static class SecurityHelper
+{
+    public static string Encriptar(string info)
+    {
+        if (string.IsNullOrEmpty(info))
+            return info;
+
+        byte[] BytesEncriptar = Encoding.UTF8.GetBytes(info);
+        return Convert.ToBase64String(BytesEncriptar);
+    }
+
+    public static string Desencriptar(string info)
+    {
+        if (string.IsNullOrEmpty(info))
+            return info;
+
+        try
+        {
+            byte[] BytesDesencriptar = Convert.FromBase64String(info);
+            return Encoding.UTF8.GetString(BytesDesencriptar);
+        }
+        catch (Exception)
+        {
+            // If the value is not valid Base64 (e.g., plain-text legacy value),
+            // return it unchanged. This is intentional — see "Password Storage" below.
+            return info;
+        }
+    }
+}
+```
+
+<Warning>
+  **Base64 is encoding, not encryption.** Anyone with the encoded string can decode it in seconds with any standard tool. It prevents accidental plain-text exposure in log files, screenshots, and config diffs — it is **not** a substitute for real encryption. Before going to production, replace Base64 with AES-256 symmetric encryption (or delegate to an HSM / key management service) for all secrets.
+</Warning>
+
+## ConfigurationExtensions — Decrypting Connection Strings
+
+`ConfigurationExtensions.GetDecryptedConnectionString()` is a convenience wrapper that retrieves a named connection string and decodes it in one call:
+
+```csharp
+// Helpers/ConfigurationExtensions.cs
+public static class ConfigurationExtensions
+{
+    public static string GetDecryptedConnectionString(
+        this IConfiguration configuration, string name)
+    {
+        var raw = configuration.GetConnectionString(name);
+        if (string.IsNullOrEmpty(raw)) return string.Empty;
+        return SecurityHelper.Desencriptar(raw);
+    }
+
+    public static string GetDecryptedValue(
+        this IConfiguration configuration, string key)
+    {
+        var raw = configuration[key];
+        if (string.IsNullOrEmpty(raw)) return string.Empty;
+        return SecurityHelper.Desencriptar(raw);
+    }
+}
+```
+
+Every Model class that opens a `SqlConnection` uses this extension:
+
+```csharp
+// Any Model class — opening a connection
+using var connection = new SqlConnection(
+    _configuration.GetDecryptedConnectionString("SqlCon")
+);
+```
+
+## Password Storage
+
+Passwords in `SMX_OHEM` are stored as Base64-encoded strings. The `GetUser` login query tests **both** the Base64-encoded form (`@PasswordEncrypted`) and the plain-text form (`@PasswordPlain`) to support accounts that pre-date the encoding requirement:
+
+```sql
+-- Queries/Queries.json — GetUser
+WHERE ...
+  AND (T0.[Password] = @PasswordEncrypted OR T0.[Password] = @PasswordPlain)
+  AND T0.[Active] = 1
+```
+
+`HomeModel` encodes the submitted password before querying:
+
+```csharp
+// The caller encodes the password before passing it to GetValidateUser
+string passwordEncrypted = SecurityHelper.Encriptar(model.Password);
+// Both forms are sent to the query as separate parameters
+```
+
+## Session
+
+In addition to the authentication cookie, Scan4 also configures `ISession` for server-side state:
+
+```csharp
+// Program.cs — session configuration
+builder.Services.AddSession(options =>
+{
+    options.IdleTimeout        = TimeSpan.FromHours(8);
+    options.Cookie.HttpOnly    = true;
+    options.Cookie.IsEssential = true;
+});
+```
+
+Session is initialized with `UseSession()` in the middleware pipeline, placed **before** `UseAuthentication()` so that session data is available during the authentication handshake. The 8-hour idle timeout matches the authentication cookie expiration.
+
+## Anti-Forgery Tokens
+
+All POST controller actions that mutate state are protected with `[ValidateAntiForgeryToken]`. Razor views automatically include the hidden `__RequestVerificationToken` field when using `<form asp-action="...">` tag helpers.
+
+```csharp
+// HomeController.cs — example anti-forgery attribute
+[HttpPost]
+[ValidateAntiForgeryToken]
+public async Task<IActionResult> Index(LoginViewModel model)
+{
+    // ...
+}
+```
+
+## Managing Secrets Safely
+
+<Tabs>
+  <Tab title="Development">
+
+Store real API keys and connection strings in .NET User Secrets — they are saved outside the project directory and never committed to source control. The project is already configured with a `UserSecretsId` in `Pedidos-logistica.csproj`:
+
+```xml
+<!-- Pedidos-logistica.csproj -->
+<UserSecretsId>73182cf1-e358-4ff2-a0ca-1e19c4496416</UserSecretsId>
+```
+
+Set secrets from the CLI (values must already be Base64-encoded):
+
+```bash
+dotnet user-secrets set "GoogleMaps:ApiKey" "<base64-encoded-key>"
+dotnet user-secrets set "ConnectionStrings:SqlCon" "<base64-encoded-connection-string>"
+```
+
+Because `Program.cs` re-adds User Secrets **after** the JSON config files, secrets always override the placeholder values in `appsettings.json` and `GoogleMaps/GoogleMaps.json`. See [Google Maps Integration](/architecture/google-maps) for details on the configuration loading order.
+
+  </Tab>
+  <Tab title="Production">
+
+Never use User Secrets in production. Instead, supply sensitive values through one of these mechanisms:
+
+**Environment variables** — set `ConnectionStrings__SqlCon` and `GoogleMaps__ApiKey` as OS-level environment variables (double underscore maps to the `:` separator in `IConfiguration`).
+
+**Azure Key Vault** — use the `Azure.Extensions.AspNetCore.Configuration.Secrets` package to load secrets at startup. Combine with Managed Identity to eliminate credential management entirely.
+
+**Docker / Kubernetes secrets** — mount secrets as environment variables or files into the container; read them with the standard `IConfiguration` providers.
+
+  </Tab>
+</Tabs>
+
+<Tip>
+  Even in production, Base64 encoding the secrets before storing them is acceptable as a consistency measure (so `SecurityHelper.Desencriptar()` continues to work without code changes). However, the primary security control must be **access restriction** — Key Vault policies, IAM roles, or OS-level environment isolation — not the encoding itself.
+</Tip>
+
+## Role-Based Authorization Quick Reference
+
+Controllers and actions use standard ASP.NET Core attributes. The `"Module"` claim is a multi-value claim — users may hold several simultaneously — and is checked in `RedirectToFirstAvailableModule`:
+
+```csharp
+// Check if the user holds a specific module claim
+var modules = User.FindAll("Module").Select(c => c.Value).ToHashSet();
+if (!modules.Contains("2"))
+    return Forbid(); // User does not have the Routes module
+```
+
+| Role Code | Role Name | Default Landing | Auto-Assigned Modules |
+|---|---|---|---|
+| `'1'` | Administrador | Dashboard | All (1–5) |
+| `'2'` | Supervisor | Dashboard (if Module 1) | Assigned per `SMX_MDAP` |
+| `'3'` | Operador | Rutas (if Module 2) | Assigned per `SMX_MDAP` |
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    Full DI registrations and middleware pipeline order.
+  </Card>
+  <Card title="Database" icon="database" href="/architecture/database">
+    SMX_OHEM schema and the GetUser query that drives authentication.
+  </Card>
+  <Card title="Google Maps" icon="map" href="/architecture/google-maps">
+    API key configuration, User Secrets loading order, and production key management.
+  </Card>
+  <Card title="Users Admin" icon="users" href="/admin/users">
+    Creating users, assigning modules, and managing roles.
+  </Card>
+</CardGroup>

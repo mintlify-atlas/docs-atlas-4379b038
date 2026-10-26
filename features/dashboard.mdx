@@ -1,0 +1,91 @@
+---
+title: "Dashboard: KPIs and Module Overview for Supervisors"
+sidebarTitle: "Dashboard"
+description: "The Dashboard (Module 1) gives logistics supervisors a KPI overview and entry point to all modules. Accessible to Admin role or users with Module claim '1'."
+---
+
+The Dashboard is the default landing page for logistics supervisors in Scan4 — Pedidos Logística. It presents a high-level view of route activity, pending deliveries, and operational metrics. When a user logs in, the application checks their role and module claims to determine whether to show the Dashboard or redirect them to the first module they are permitted to access.
+
+## Access Control
+
+The Dashboard view is protected by an `[Authorize]` attribute and an additional module-level check inside `DashboardController.Index()`. A user gains access if their identity carries **role `1`** (Admin) or a **Module claim with value `"1"`**.
+
+```csharp
+// Controllers/DashboardController.cs
+public IActionResult Index()
+{
+    var userRol = User.FindFirst(ClaimTypes.Role)?.Value ?? "";
+    var hasDashboard = userRol == "1" || User.HasClaim("Module", "1");
+
+    if (!hasDashboard)
+    {
+        // Redirigir al primer módulo al que sí tenga permiso
+        if (User.HasClaim("Module", "2")) return RedirectToAction("Rutas", "Rutas");
+        if (User.HasClaim("Module", "3")) return RedirectToAction("Reportes", "Dashboard");
+        if (User.HasClaim("Module", "4")) return RedirectToAction("Perfil", "Usuarios");
+        if (User.HasClaim("Module", "5")) return RedirectToAction("Configuracion", "Configuracion");
+
+        return RedirectToAction("SinAcceso", "Home");
+    }
+
+    ViewBag.Seccion = "Inicio";
+    return View();
+}
+```
+
+### Redirect waterfall
+
+When a user lacks Dashboard access, the controller performs a sequential redirect in module-number order:
+
+<Steps>
+  <Step title="Module 2 — Rutas">
+    If the user has the Rutas claim, they land on `/Rutas/Rutas`.
+  </Step>
+  <Step title="Module 3 — Reportes">
+    If not, and they have the Reportes claim, they land on `/Dashboard/Reportes`.
+  </Step>
+  <Step title="Module 4 — Perfil">
+    If not, and they have the Perfil claim, they land on `/Usuarios/Perfil`.
+  </Step>
+  <Step title="Module 5 — Configuración">
+    If not, and they have the Configuración claim, they land on `/Configuracion/Configuracion`.
+  </Step>
+  <Step title="Sin acceso">
+    If none of the above apply, the user is redirected to the **SinAcceso** error page.
+  </Step>
+</Steps>
+
+## KPI Cards
+
+The Dashboard surface is designed to present key performance indicators that give supervisors an at-a-glance view of route health. The KPI tiles cover metrics such as total active routes, packages in transit, assigned operators, and volume utilisation.
+
+<Note>
+  KPI filters (date range, zone selector, operator picker) are implemented as UI placeholders and are reserved for a future release. The underlying data model is already in place — they will be wired to live queries when the reporting layer is completed.
+</Note>
+
+## Module Summary Cards
+
+Below the KPI row the Dashboard provides navigation cards for each module the logged-in user is permitted to access.
+
+<CardGroup cols={2}>
+  <Card title="Routes" icon="map" href="/features/routes">
+    Daily route cards with operator and vehicle assignment, destination counts, and status badges.
+  </Card>
+  <Card title="Route Builder" icon="route" href="/features/route-builder">
+    Interactive map modal for selecting destinations, displaying live traffic, and creating or updating a route.
+  </Card>
+  <Card title="New Route Request" icon="plus-circle" href="/features/new-route-request">
+    Single-address delivery or pickup form with geocoding, cubicage calculator, and folio generation.
+  </Card>
+  <Card title="Reports" icon="chart-bar" href="/features/reports">
+    Logistics activity overview for completed routes, distances, and operator performance.
+  </Card>
+</CardGroup>
+
+## Setting Up Access
+
+Module claims are assigned per user in the **Usuarios** admin panel. To grant or revoke Dashboard access for a specific user, see [Roles & Permissions](/admin/roles-permissions).
+
+<Tip>
+  Admin users (role `1`) always have access to every module regardless of individual Module claims. You only need to configure claims for non-admin roles.
+</Tip>

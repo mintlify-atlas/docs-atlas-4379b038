@@ -1,0 +1,248 @@
+---
+title: "Vehicle Fleet: Register and Manage Delivery Vehicles"
+sidebarTitle: "Vehicles"
+description: "Add, update, and deactivate delivery vehicles in SMX_VHLS through the Configuracion module, and see how availability status feeds the route planner."
+---
+
+The Vehicles section lives inside Module 5 (Configuración) and gives Administrators and Supervisors full control over the delivery fleet that powers the Rutas route-planning module. Each vehicle record tracks internal codes, license plates, make, model, year, and type — and its `Estatus` field determines whether the vehicle appears as an available option when dispatchers are building new routes.
+
+<Warning>
+  Operators (role `3`) have **read-only** access to Configuración. Any attempt to create, edit, or deactivate a vehicle redirects immediately to the `Configuracion` view with a `TempData["ErrorVehiculo"]` message: _"Los operadores tienen permisos de solo lectura."_ No data is modified.
+</Warning>
+
+## Access Control
+
+The `Configuracion()` view action verifies the claim before loading any data:
+
+```csharp
+var userRol = User.FindFirst(ClaimTypes.Role)?.Value ?? "";
+var hasConfig = userRol == "1" || User.HasClaim("Module", "5");
+
+if (!hasConfig)
+{
+    return RedirectToAction("SinAcceso", "Home");
+}
+```
+
+Users without role `"1"` who also lack a `Module = "5"` claim are redirected to the **Sin Acceso** page.
+
+## Vehicle Fields
+
+All vehicle data is stored in the `SMX_VHLS` table. The entity classes `VehiculosClass` (creation) and `VehiculosEditClass` (editing) define the fields available in each form.
+
+<Tabs>
+  <Tab title="Create — VehiculosClass">
+    <ParamField body="codigointerno" type="string" required>
+      Unique internal fleet code assigned by the company (e.g. `"VH-001"`).
+    </ParamField>
+    <ParamField body="placasvehiculo" type="string" required>
+      Official license plate(s). Stored in the `Placas` column.
+    </ParamField>
+    <ParamField body="marca" type="string" required>
+      Vehicle make / manufacturer (e.g. `"Mercedes-Benz"`).
+    </ParamField>
+    <ParamField body="modelo" type="string" required>
+      Vehicle model name (e.g. `"Sprinter 316"`).
+    </ParamField>
+    <ParamField body="anio" type="string" required>
+      Model year stored as a string (e.g. `"2022"`).
+    </ParamField>
+    <ParamField body="tipovehiculo" type="string" required>
+      Vehicle category (e.g. `"Camioneta"`, `"Camión 3.5t"`).
+    </ParamField>
+    <ParamField body="estatus" type="string">
+      Operational status. Defaults to `"Disponible"` when omitted. Other common values: `"En ruta"`, `"Mantenimiento"`, `"Inactivo"`.
+    </ParamField>
+    <ParamField body="observaciones" type="string">
+      Free-text notes about the vehicle. Stored as nullable.
+    </ParamField>
+  </Tab>
+  <Tab title="Edit — VehiculosEditClass">
+    <ParamField body="EditIdVehiculo" type="string">
+      Auto-generated `IdVehiculo` primary key. Used with `codigointerno` in the `WHERE` clause to locate the record.
+    </ParamField>
+    <ParamField body="EditCodigoInterno" type="string" required>
+      Updated internal fleet code.
+    </ParamField>
+    <ParamField body="EditPlacas" type="string" required>
+      Updated license plate(s).
+    </ParamField>
+    <ParamField body="EditMarca" type="string" required>
+      Updated make.
+    </ParamField>
+    <ParamField body="EditModelo" type="string" required>
+      Updated model.
+    </ParamField>
+    <ParamField body="EditAnio" type="string" required>
+      Updated model year.
+    </ParamField>
+    <ParamField body="EditTipoVehiculo" type="string" required>
+      Updated vehicle type.
+    </ParamField>
+    <ParamField body="EditEstatus" type="string">
+      Updated status. Defaults to `"Disponible"` if empty.
+    </ParamField>
+    <ParamField body="EditObservaciones" type="string">
+      Updated notes. Nullable.
+    </ParamField>
+  </Tab>
+</Tabs>
+
+## Endpoints
+
+### Register a Vehicle
+
+```http
+POST /Configuracion/CreateVehiculo
+Content-Type: application/x-www-form-urlencoded
+```
+
+Form-bound to `VehiculosClass`. All six required fields are validated before the insert runs. If any required field is blank, `TempData["ErrorVehiculo"]` is set with _"Complete todos los campos obligatorios del vehículo"_ and no SQL is executed.
+
+```sql
+-- Queries:InsertNewVehicule
+INSERT INTO SMX_VHLS (
+  [CodigoInterno],[Placas],[Marca],[Modelo],
+  [Anio],[TipoVehiculo],[Estatus],[FechaAlta],[Observaciones]
+)
+VALUES (
+  @CodigoInterno, @Placas, @Marca, @Modelo,
+  @Anio, @TipoVehiculo, @Estatus, GETDATE(), @Observaciones
+)
+```
+
+When `estatus` is submitted empty, the model layer substitutes `"Disponible"` before executing:
+
+```csharp
+command.Parameters.AddWithValue(
+    "@Estatus",
+    string.IsNullOrWhiteSpace(model.estatus) ? "Disponible" : model.estatus
+);
+```
+
+On success, `TempData["VehiculoCreado"]` contains _"Vehículo creado exitosamente"_.
+
+---
+
+### Edit a Vehicle
+
+```http
+POST /Configuracion/EditVehicule
+Content-Type: application/x-www-form-urlencoded
+```
+
+Form-bound to `VehiculosEditClass`. The same six required-field check runs first. On validation failure, `TempData["ErrorVehiculeEdited"]` is set.
+
+```sql
+-- Queries:EditVehicule
+UPDATE [SMX_VHLS]
+SET CodigoInterno = @CodigoInterno,
+    Placas        = @Placas,
+    Marca         = @Marca,
+    Modelo        = @Modelo,
+    Anio          = @Anio,
+    TipoVehiculo  = @TipoVehiculo,
+    Estatus       = @Estatus,
+    Observaciones = @Observaciones
+WHERE IdVehiculo = @IdVehiculo OR CodigoInterno = @CodigoInterno
+```
+
+<Note>
+  The `WHERE` clause matches on **either** `IdVehiculo` or `CodigoInterno`. This ensures the update succeeds even when `EditIdVehiculo` is not available in the form context.
+</Note>
+
+On success, `TempData["VehiculeEdited"]` contains _"Vehículo editado exitosamente"_ and `TempData["ck_SelectedInput"]` is set to `"edicion"` to restore the edit tab in the view.
+
+---
+
+### Deactivate a Vehicle (Soft-Delete)
+
+```http
+GET /Configuracion/DeleteVehiculo?id={codigointerno_or_idvehiculo}
+```
+
+Sets `Estatus = 'Inactivo'` and stamps `FechaBaja = GETDATE()`. The row is **never physically deleted**.
+
+```sql
+-- Queries:DeleteVehicule
+UPDATE SMX_VHLS
+SET Estatus   = 'Inactivo',
+    FechaBaja = GETDATE()
+WHERE IdVehiculo = @IdVehiculo OR CodigoInterno = @CodigoInterno
+```
+
+On success, `TempData["VehiculeEdited"]` is set to _"Vehículo inhabilitado"_.
+
+---
+
+### List Active Vehicles
+
+```http
+GET /Configuracion/Configuracion
+```
+
+The `Configuracion()` view action populates a `DataSet` with the `SMX_VHLS` table using `SelectVehicules`, which automatically excludes soft-deleted records:
+
+```sql
+-- Queries:SelectVehicules
+SELECT * FROM SMX_VHLS
+WHERE Estatus <> 'Inactivo' AND Estatus <> 'Baja'
+ORDER BY IdVehiculo DESC
+```
+
+## Vehicle Availability in Route Planning
+
+When a dispatcher opens the **Nueva Ruta** panel in the Rutas module, the system fetches only vehicles that are neither `'Inactivo'` nor `'Baja'`:
+
+```sql
+-- Rutas:GetVehiculosDisponibles
+SELECT [IdVehiculo], [CodigoInterno], [Placas],
+       [Marca], [Modelo], [Anio], [TipoVehiculo], [Estatus]
+FROM SMX_VHLS
+WHERE [Estatus] <> 'Inactivo' AND [Estatus] <> 'Baja'
+ORDER BY [IdVehiculo] DESC
+```
+
+This means a vehicle set to `"Mantenimiento"` still appears in the dropdown — only `'Inactivo'` and `'Baja'` statuses hide it from route dispatchers. To temporarily remove a vehicle from dispatch without fully deactivating it, update its status to one of those two values.
+
+<Info>
+  The `FechaBaja` column is only written during a soft-delete operation. Vehicles that are manually set to `'Inactivo'` via the edit form do **not** have their `FechaBaja` stamped automatically — that stamp is exclusive to the `DeleteVehiculo` endpoint.
+</Info>
+
+## Step-by-Step: Registering a Fleet Vehicle
+
+<Steps>
+  <Step title="Open Configuración">
+    Navigate to **Configuración** in the sidebar. The page loads all non-deactivated vehicles from `SMX_VHLS`.
+  </Step>
+  <Step title="Open the registration panel">
+    Click **Nuevo Vehículo** to expand the creation form. All six required fields are highlighted with an asterisk.
+  </Step>
+  <Step title="Enter vehicle details">
+    Fill in `codigointerno`, `placasvehiculo`, `marca`, `modelo`, `anio`, and `tipovehiculo`. Optionally set a starting status (defaults to `"Disponible"`) and any observations.
+  </Step>
+  <Step title="Submit">
+    POST to `POST /Configuracion/CreateVehiculo`. A green banner (`TempData["VehiculoCreado"]`) confirms success. The new vehicle immediately appears in the `GetVehiculosDisponibles` query for route dispatching.
+  </Step>
+</Steps>
+
+## Status Reference
+
+| Status | Visible in Fleet List | Available for Dispatch |
+|---|---|---|
+| `Disponible` | ✅ | ✅ |
+| `En ruta` | ✅ | ✅ |
+| `Mantenimiento` | ✅ | ✅ |
+| `Inactivo` | ❌ | ❌ |
+| `Baja` | ❌ | ❌ |
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="Route Management" icon="route" href="/features/routes">
+    See how available vehicles are selected when creating and assigning delivery routes.
+  </Card>
+  <Card title="Roles & Permissions" icon="shield-halved" href="/admin/roles-permissions">
+    Learn which roles can access the Configuración module and how access is enforced.
+  </Card>
+</CardGroup>

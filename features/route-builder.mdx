@@ -1,0 +1,196 @@
+---
+title: "Route Builder: Interactive Map and Destination Grid"
+sidebarTitle: "Route Builder"
+description: "The Armar Ruta modal combines a live Google Maps view, a selectable destination grid, real traffic data, and a two-step Create Route flow with rescheduling simulation."
+---
+
+The Route Builder is the **Armar Ruta** modal, opened by clicking any daily route card (or its **Ver en mapa** button) in the Routes view. It replicates the full `MapaRutasLogisticas` module directly inside Scan4. The modal receives the selected day's route context — including its simulated destinations (`ruta.destinosMapa`) and geographic origin (`ruta.origen`) — without any additional API call. All map rendering and routing logic lives in `wwwroot/js/armar-ruta-mapa.js`.
+
+## Opening the Modal
+
+When a supervisor clicks a daily card the dashboard calls `window.ArmarRutaMapa.abrir(ruta)`, passing the full route context object. The modal then:
+
+1. Preloads the Operator and Vehicle combos with the values already assigned to that day.
+2. Renders the destination grid from `ruta.destinosMapa`.
+3. Waits for the Google Maps SDK to be ready, initialises the map, and automatically triggers **Mostrar ruta** to draw the initial path.
+
+```javascript
+// wwwroot/js/armar-ruta-mapa.js
+window.ArmarRutaMapa.abrir = async function abrir(rutaContexto) {
+    cachearElementosDom();
+    engancharEventosUnaVez();
+    estado.rutaContexto = rutaContexto || null;
+    mostrarContexto();
+    inicializarCombosSiHaceFalta();
+    precargarCombos();
+
+    dom.modalBackdrop.hidden = false;
+    dom.modal.hidden = false;
+
+    await esperarGoogleMapsListo();
+    await inicializarMapaSiHaceFalta();
+
+    cargarDestinosDeLaRuta();
+    actualizarIndicadorCubicaje();
+
+    setTimeout(() => { onMostrarRutaClick(); }, 200);
+};
+```
+
+## Destination Grid
+
+The grid displays one row per destination. Most fields are **read-only** (pulled from the route context); only the selection checkbox is interactive. Each row shows:
+
+| Column | Description |
+|--------|-------------|
+| ☑ | Checkbox to include/exclude the destination from the route |
+| # | Sequential stop number |
+| Cliente | SAP customer name |
+| RFC | Tax ID (licTradNum) |
+| Dirección | Delivery address |
+| Contacto | Contact person at destination |
+| Teléfono | Contact phone number |
+| Ciudad | City |
+| Observaciones | Delivery instructions (e.g., "Presentarse con el Lic. Pérez") |
+
+Toggling a checkbox immediately refreshes the cubicage indicator and re-draws the route on the map.
+
+## Google Maps View
+
+The map is initialised with `google.maps.Marker` (classic API — no Map ID required) so it works with development API keys that do not have Map IDs configured.
+
+```javascript
+// wwwroot/js/armar-ruta-mapa.js — origin and destination marker setup
+estado.map = new google.maps.Map(dom.mapaDiv, {
+    center: { lat: 19.3850, lng: -99.1740 },
+    zoom: 11,
+    mapTypeControl: false,
+    streetViewControl: false,
+    fullscreenControl: true
+});
+
+estado.trafficLayer   = new google.maps.TrafficLayer();
+estado.directionsService  = new google.maps.DirectionsService();
+estado.directionsRenderer = new google.maps.DirectionsRenderer({
+    map: estado.map,
+    suppressMarkers: true   // custom numbered markers are used instead
+});
+```
+
+Origin (distribution centre) is rendered as a blue **O** marker. Each destination receives a green numbered marker. Enabling the **Mostrar tráfico** toggle calls `estado.trafficLayer.setMap(estado.map)`.
+
+## Action Buttons
+
+### Mostrar ruta
+
+Calls `DirectionsService` with all currently **checked** destinations as waypoints, then draws the road-following path on the map. The distance (km), travel time, and number of stops are reflected in the modal's metrics bar.
+
+```javascript
+// wwwroot/js/armar-ruta-mapa.js — simplified Directions call
+estado.directionsService.route(
+    {
+        origin:      { lat: Number(estado.origen.lat), lng: Number(estado.origen.lng) },
+        destination: { lat: Number(destinoFinal.lat),  lng: Number(destinoFinal.lng)  },
+        waypoints:   waypoints,   // intermediate active destinations
+        optimizeWaypoints: false,
+        travelMode: google.maps.TravelMode.DRIVING
+    },
+    (resultado, status) => {
+        if (status === google.maps.DirectionsStatus.OK) {
+            estado.directionsRenderer.setDirections(resultado);
+        }
+    }
+);
+```
+
+If Google Directions returns an error (e.g., billing not enabled on a dev key), the builder falls back to [OSRM](https://project-osrm.org/) for real road geometry and draws the path as a `google.maps.Polyline`.
+
+### Sugerir ruta (AI stub)
+
+Posts to `/api/rutas-mapa/sugerir`. The endpoint currently returns a stub response explaining that the AI engine is not yet connected:
+
+```json
+{
+  "disponible": false,
+  "mensaje": "La sugerencia de rutas por IA aún no está conectada. Próximamente esta acción consumirá un modelo de lenguaje que, con base en choferes disponibles, tipo de camión y carga, propondrá el orden óptimo de los pedidos seleccionados.",
+  "ordenSugerido": null
+}
+```
+
+The request payload includes zone, available destination IDs, number of drivers, vehicle type, and estimated load in m³ — all fields the future AI service will consume.
+
+### Crear ruta (two-step flow)
+
+<Steps>
+  <Step title="Validate operator and vehicle">
+    Both fields must be selected from the filterable combo lists. The combos enforce list membership — free-text input is cleared on blur if it doesn't match a valid option.
+  </Step>
+  <Step title="Check for unselected destinations">
+    If any destination checkbox is unchecked and the destination has not yet been rescheduled, the builder **does not create the route**. Instead, it marks each unselected destination as `reprogramado: true`, re-renders the grid with a visual indicator, and shows an informational message: *"Los siguientes destinos quedarán reprogramados… Se informará por correo al remitente y al destinatario."*
+
+    ```javascript
+    // wwwroot/js/armar-ruta-mapa.js
+    function reprogramarPendientes(destinosPendientes) {
+        destinosPendientes.forEach((destino) => {
+            destino.reprogramado = true;
+        });
+        renderizarGrid();
+        mostrarMensaje(
+            `Los siguientes destinos no fueron seleccionados y quedaron reprogramados...
+            Presiona "Crear ruta" de nuevo para continuar.`,
+            "info"
+        );
+    }
+    ```
+  </Step>
+  <Step title="Second press — commit the route">
+    With no pending unselected destinations, the builder POSTs the full route object to `/api/rutas-mapa`. On success, the dashboard card's distance and time labels are updated in real time via `window.NuevaRutaDashboard.actualizarRuta()`.
+  </Step>
+</Steps>
+
+## Route JSON Contract
+
+The POST body sent to `POST /api/rutas-mapa` matches the `RutaLogisticaRequest` model:
+
+```json
+{
+  "rutaId": 0,
+  "origen": { "lat": 19.384948, "lng": -99.174292 },
+  "zona": "Centro",
+  "vehiculo": "Unidad 102",
+  "operador": "María García",
+  "prioridad": "Media",
+  "fechaRuta": "2026-07-09T00:00:00",
+  "distanciaKm": 12.4,
+  "tiempoEstimadoMin": 35,
+  "generadaPorIA": false,
+  "destinos": [
+    {
+      "id": 1,
+      "nombre": "Polanco",
+      "cliente": "Grupo ABC",
+      "lat": 19.433,
+      "lng": -99.2,
+      "activo": true,
+      "fecha": "2026-07-09",
+      "hora": "09:00",
+      "reprogramado": false,
+      "ordenSugerido": null
+    }
+  ]
+}
+```
+
+The `generadaPorIA` flag is reserved for when the **Sugerir ruta** AI engine is connected; destinations whose order came from the AI suggestion will carry this flag as `true`.
+
+## Cubicage Indicator
+
+The modal shows a live cubicage bar comparing the total volume of **selected** destinations against the assigned vehicle's capacity. If the selected volume exceeds capacity the bar turns red (`cubicaje-excedido`); otherwise it is green (`cubicaje-ok`). The capacity is read from the vehicle combo value (which encodes the capacity in m³) or falls back to the route context's `capacity` property.
+
+<Note>
+  Folio numbers shown in the destination grid follow the format **REC-XXXXXX** for pickups (Recolección) and **ENT-XXXXXX** for deliveries (Entrega). They are generated by `FolioGeneradorEnMemoria`, which uses a zero-padded six-digit counter starting at 300000 and incrementing for each request in the session.
+</Note>
+
+<Warning>
+  The in-memory route repository (`RutaRepositoryEnMemoria`) and the folio generator reset every time the application restarts. Routes and folios created during a session are **not persisted** until the SQL Server migration is completed. See [Architecture: Database](/architecture/database) for the production persistence roadmap.
+</Warning>

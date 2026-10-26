@@ -1,47 +1,167 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Scan4 Running Locally in Under 10 Minutes"
+sidebarTitle: "Quickstart"
+description: "Clone the repo, wire up SQL Server and Google Maps credentials with .NET User Secrets, and have Scan4 serving on localhost in a few commands."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+This guide walks you through every step needed to run Scan4 on a developer workstation. You will need access to an existing SQL Server instance that already holds the ScanMex logistics and SAP Business One databases, and a Google Cloud project with the Maps JavaScript API and Routes API enabled. From a fresh clone to a working login screen takes under ten minutes.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+<Step title="Verify prerequisites">
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+Before cloning, confirm the following are in place:
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
-</Steps>
+| Requirement | Notes |
+|---|---|
+| **.NET 8 SDK** | `dotnet --version` should report `8.x.x` |
+| **SQL Server instance** | Must contain `SMX_OHEM` (users/roles), `SMX_VHLS` (vehicles), and the `SMXLOG` logistics database |
+| **Google Maps API key** | Project must have **Maps JavaScript API** and **Routes API** both enabled in Google Cloud Console |
+| **Git** | Any recent version |
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
-
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+You can confirm the Maps JavaScript API and Routes API are enabled at [Google Cloud Console → APIs & Services → Enabled APIs](https://console.cloud.google.com/apis/dashboard).
 </Tip>
+
+</Step>
+
+<Step title="Clone the repository and restore packages">
+
+```bash
+git clone https://github.com/aloncm/scan4.git
+cd scan4
+dotnet restore
+```
+
+`dotnet restore` downloads `Microsoft.Data.SqlClient 7.0.1` — the only NuGet dependency declared in `Pedidos-logistica.csproj`. No additional package feeds are required.
+
+</Step>
+
+<Step title="Initialize User Secrets and supply credentials">
+
+Scan4 stores all sensitive values — connection strings and the Google Maps API key — as Base64-encoded strings. The `SecurityHelper.Desencriptar` method decodes them at runtime:
+
+```csharp
+// Helpers/SecurityHelper.cs
+public static string Desencriptar(string info)
+{
+    byte[] BytesDesencriptar = Convert.FromBase64String(info);
+    return Encoding.UTF8.GetString(BytesDesencriptar);
+}
+```
+
+First, initialize the User Secrets store for the project (the `UserSecretsId` is already set in `Pedidos-logistica.csproj`):
+
+```bash
+dotnet user-secrets init
+```
+
+Then encode each connection string and the API key to Base64, and store them as secrets. The three required keys are shown below — replace the placeholder values with your real ones:
+
+```bash
+# Logistics database (SMXLOG)
+dotnet user-secrets set "ConnectionStrings:SqlCon" "<base64-of-connection-string>"
+
+# SAP Business One database (e.g. SMXGDL_PROD)
+dotnet user-secrets set "ConnectionStrings:SqlConSap" "<base64-of-sap-connection-string>"
+
+# Google Maps API key
+dotnet user-secrets set "GoogleMaps:ApiKey" "<base64-of-api-key>"
+```
+
+To produce the Base64 values, see the [Configuration page](/configuration#encoding-connection-strings) for the exact `echo | base64` commands and a full explanation of why secrets are re-loaded after `GoogleMaps.json` in `Program.cs`.
+
+<Note>
+`Program.cs` re-registers User Secrets **after** loading `GoogleMaps/GoogleMaps.json` so that real secrets always override the `"TU_API_KEY"` placeholder that ships in the repository. If you skip this step the app will start but map features will not render.
+</Note>
+
+</Step>
+
+<Step title="Run the application">
+
+```bash
+dotnet run
+```
+
+By default the Kestrel server listens on `https://localhost:5001` (and `http://localhost:5000`). Open your browser and navigate to:
+
+```text
+https://localhost:5001
+```
+
+You should see the Scan4 login form. If the browser warns about the self-signed development certificate, run `dotnet dev-certs https --trust` once and restart.
+
+</Step>
+
+<Step title="Log in and verify your role">
+
+Enter credentials for a user that exists in the `SMX_OHEM` table. After a successful login, `HomeController` reads the `U_Rol` column from the returned `DataRow` and builds cookie claims accordingly:
+
+```csharp
+// Controllers/HomeController.cs
+rol = dr["U_Rol"]?.ToString() ?? "";
+
+// Role 1 (Admin) gets all module claims automatically
+if (rol == "1")
+{
+    claims.Add(new Claim("Module", "1")); // Dashboard
+    claims.Add(new Claim("Module", "2")); // Rutas
+    claims.Add(new Claim("Module", "3")); // Reportes
+    claims.Add(new Claim("Module", "4")); // Usuarios
+    claims.Add(new Claim("Module", "5")); // Configuración
+}
+```
+
+After authentication the app redirects each user to their first permitted module:
+
+| Role | First redirect |
+|---|---|
+| `1` — Administrador | `/Dashboard/Index` |
+| Any role with Module 1 | `/Dashboard/Index` |
+| Module 2 only | `/Rutas/Rutas` |
+| Module 3 only | `/Dashboard/Reportes` |
+| Module 4 only | `/Usuarios/Perfil` |
+| Module 5 only | `/Configuracion/Configuracion` |
+
+If a user has no module assignments, they land on `/Home/SinAcceso`.
+
+</Step>
+
+</Steps>
+
+<Note>
+**Session lifetime.** Cookie authentication is configured in `Program.cs` with `ExpireTimeSpan = TimeSpan.FromHours(8)` and `SlidingExpiration = true`. This means an active session resets its 8-hour timer on each request. Sessions are non-persistent (`IsPersistent = false`) — closing the browser invalidates the cookie immediately.
+</Note>
+
+## What to do next
+
+<CardGroup cols={2}>
+  <Card
+    title="Configuration Reference"
+    icon="gear"
+    href="/configuration"
+  >
+    Full details on appsettings.json structure, Base64 encoding, GoogleMapsOptions, and production deployment guidelines.
+  </Card>
+  <Card
+    title="Route Builder"
+    icon="map"
+    href="/features/route-builder"
+  >
+    Learn how the Google Maps modal works end-to-end, from the destination grid to the `POST /api/rutas-mapa` call.
+  </Card>
+  <Card
+    title="User Administration"
+    icon="users"
+    href="/admin/users"
+  >
+    Add your first non-admin user, assign module permissions, and understand the `@scanmex.com` email domain enforcement.
+  </Card>
+  <Card
+    title="API Reference"
+    icon="code"
+    href="/api/rutas-mapa"
+  >
+    Explore the REST endpoints exposed by `RutasMapaController` and `SolicitudesRutaController`.
+  </Card>
+</CardGroup>

@@ -1,0 +1,285 @@
+---
+title: "Configure Database Connections and Google Maps API Keys"
+sidebarTitle: "Configuration"
+description: "appsettings.json layout, Base64-encoded connection strings, Google Maps key wiring, User Secrets commands, and production security practices for Scan4."
+---
+
+Scan4 reads its configuration from three layered sources: `appsettings.json` (committed to the repository with placeholder values), `GoogleMaps/GoogleMaps.json` (also a placeholder), and .NET User Secrets (the actual secrets, never committed). Understanding this loading order is essential because `Program.cs` deliberately re-adds User Secrets after `GoogleMaps.json` to guarantee that real API keys always win over placeholders. This page explains every setting, how to encode values, and what to do before deploying to production.
+
+## appsettings.json structure
+
+The committed `appsettings.json` defines the three configuration sections Scan4 reads at startup. The values shown here are Base64-encoded placeholders — never real credentials.
+
+```json
+{
+  "GoogleMaps": {
+    "ApiKey": "<base64-placeholder>"
+  },
+  "ConnectionStrings": {
+    "SqlCon":    "<base64-of-logistics-connection-string>",
+    "SqlConSap": "<base64-of-sap-connection-string>"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default":             "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*"
+}
+```
+
+<Info>
+`AllowedHosts: "*"` is acceptable in development. Restrict this to your actual hostnames (e.g. `"scan4.scanmex.com"`) before going to production.
+</Info>
+
+## Connection strings
+
+Scan4 uses two SQL Server connection strings, both retrieved through the `ConfigurationExtensions.GetDecryptedConnectionString` helper which Base64-decodes the raw value before handing it to `Microsoft.Data.SqlClient`:
+
+```csharp
+// Helpers/ConfigurationExtensions.cs
+public static string GetDecryptedConnectionString(
+    this IConfiguration configuration, string name)
+{
+    var raw = configuration.GetConnectionString(name);
+    if (string.IsNullOrEmpty(raw)) return string.Empty;
+    return SecurityHelper.Desencriptar(raw);
+}
+```
+
+| Key | Database | Purpose |
+|---|---|---|
+| `SqlCon` | `SMXLOG` (logistics) | Stores routes, destinations, users, vehicles, modules |
+| `SqlConSap` | e.g. `SMXGDL_PROD` | SAP Business One — read-only client lookup (`SMX_OHEM`, `SMX_VHLS`, partner data) |
+
+### Encoding connection strings
+
+Use the following shell commands to produce the Base64 value you pass to `dotnet user-secrets set`:
+
+```bash
+# Logistics database
+echo -n 'Data source=SERVER; database=SMXLOG; user id=sa; password=SECRET;TrustServerCertificate=True;' | base64
+
+# SAP Business One database
+echo -n 'Data source=SAP-SERVER; database=SMXGDL_PROD; user id=sa; password=SECRET;TrustServerCertificate=True;' | base64
+```
+
+Copy the single-line output (no newline — that is why `-n` is required) and use it as the secret value:
+
+```bash
+dotnet user-secrets set "ConnectionStrings:SqlCon"    "<output-from-first-command>"
+dotnet user-secrets set "ConnectionStrings:SqlConSap" "<output-from-second-command>"
+```
+
+The `SecurityHelper` round-trip that encodes and decodes is straightforward:
+
+```csharp
+// Helpers/SecurityHelper.cs
+public static string Encriptar(string info)
+{
+    byte[] BytesEncriptar = Encoding.UTF8.GetBytes(info);
+    return Convert.ToBase64String(BytesEncriptar);
+}
+
+public static string Desencriptar(string info)
+{
+    byte[] BytesDesencriptar = Convert.FromBase64String(info);
+    return Encoding.UTF8.GetString(BytesDesencriptar);
+}
+```
+
+<Note>
+`Desencriptar` wraps the decode in a `try/catch` and returns the raw string if it is not valid Base64. This means if you accidentally store a plain-text connection string it will still be used as-is, but this is not recommended.
+</Note>
+
+## Google Maps API key
+
+The Google Maps API key travels through two configuration files and User Secrets before it reaches the application.
+
+### GoogleMaps/GoogleMaps.json placeholder
+
+The repository ships a `GoogleMaps/GoogleMaps.json` file containing a placeholder key (`"TU_API_KEY"`). This file is loaded explicitly in `Program.cs` so the project compiles and starts without secrets:
+
+```csharp
+// Program.cs
+builder.Configuration.AddJsonFile("Queries/Queries.json",    optional: false, reloadOnChange: true);
+builder.Configuration.AddJsonFile("GoogleMaps/GoogleMaps.json", optional: false, reloadOnChange: true);
+```
+
+### Why secrets are re-loaded after GoogleMaps.json
+
+`WebApplication.CreateBuilder(args)` automatically loads User Secrets in Development — but it does so **before** the explicit `AddJsonFile` calls above. Without the re-load shown below, `GoogleMaps.json` (loaded later) would overwrite the real key with `"TU_API_KEY"`:
+
+```csharp
+// Program.cs — re-registers User Secrets AFTER GoogleMaps.json
+// so secrets always win over the placeholder.
+if (builder.Environment.IsDevelopment())
+{
+    builder.Configuration.AddUserSecrets<Program>(optional: true);
+}
+```
+
+### Storing and encoding the API key
+
+Encode your Google Maps API key to Base64 the same way as connection strings:
+
+```bash
+echo -n 'AIzaSy...<your-real-key>...' | base64
+```
+
+Then store it as a secret:
+
+```bash
+dotnet user-secrets set "GoogleMaps:ApiKey" "<base64-output>"
+```
+
+At startup, `Program.cs` reads and decodes the key before binding it to `GoogleMapsOptions`:
+
+```csharp
+// Program.cs
+builder.Services.Configure<GoogleMapsOptions>(options =>
+{
+    var rawKey = builder.Configuration["GoogleMaps:ApiKey"] ?? "";
+    options.ApiKey = Pedidoslogistica.Helpers.SecurityHelper.Desencriptar(rawKey);
+    options.MapId  = builder.Configuration["GoogleMaps:MapId"] ?? "";
+});
+```
+
+## GoogleMapsOptions model
+
+The strongly-typed options class that receives the decoded values is defined in `Models/Mapas/GoogleMapsOptions.cs`:
+
+```csharp
+// Models/Mapas/GoogleMapsOptions.cs
+public class GoogleMapsOptions
+{
+    public string ApiKey { get; set; } = string.Empty;
+
+    /// Optional: Map ID from Google Cloud Console for Cloud-based map
+    /// styling or Advanced Markers.
+    public string MapId  { get; set; } = string.Empty;
+}
+```
+
+`RutasController` injects `IOptions<GoogleMapsOptions>` and passes the decoded values to the view via `ViewBag`:
+
+```csharp
+// Controllers/RutasController.cs
+ViewBag.GoogleMapsApiKey = _googleMapsOptions.ApiKey;
+ViewBag.GoogleMapsMapId  = _googleMapsOptions.MapId;
+```
+
+<Tip>
+`MapId` is optional. Leave it empty unless you need Cloud-based map styling or `AdvancedMarkerElement`. The current codebase uses `google.maps.Marker` (classic), which does not require a Map ID.
+</Tip>
+
+## Full User Secrets setup
+
+Run these commands once from the repository root after cloning. All three keys are required for full functionality:
+
+```bash
+# 1. Initialize the secrets store (safe to run multiple times)
+dotnet user-secrets init
+
+# 2. Logistics database connection string (Base64-encoded)
+dotnet user-secrets set "ConnectionStrings:SqlCon" "<base64-logistics-conn-string>"
+
+# 3. SAP Business One connection string (Base64-encoded)
+dotnet user-secrets set "ConnectionStrings:SqlConSap" "<base64-sap-conn-string>"
+
+# 4. Google Maps API key (Base64-encoded)
+dotnet user-secrets set "GoogleMaps:ApiKey" "<base64-api-key>"
+```
+
+To confirm all secrets are stored correctly:
+
+```bash
+dotnet user-secrets list
+```
+
+Expected output:
+
+```text
+ConnectionStrings:SqlCon    = <base64-value>
+ConnectionStrings:SqlConSap = <base64-value>
+GoogleMaps:ApiKey           = <base64-value>
+```
+
+## Configuration sections reference
+
+<Accordion title="ConnectionStrings">
+  <ParamField body="SqlCon" type="string" required>
+    Base64-encoded ADO.NET connection string for the logistics database (`SMXLOG`). Decoded at runtime by `GetDecryptedConnectionString("SqlCon")`. Must be reachable from the server running Scan4.
+  </ParamField>
+  <ParamField body="SqlConSap" type="string" required>
+    Base64-encoded connection string for the SAP Business One database. Used for read-only partner/client lookups (`SMX_OHEM`, `SMX_VHLS`, and business partner tables). Typically points to a separate SQL Server instance.
+  </ParamField>
+</Accordion>
+
+<Accordion title="GoogleMaps">
+  <ParamField body="ApiKey" type="string" required>
+    Base64-encoded Google Maps API key. Decoded by `SecurityHelper.Desencriptar` inside the `Configure<GoogleMapsOptions>` lambda in `Program.cs`. The key must have **Maps JavaScript API** and **Routes API** enabled.
+  </ParamField>
+  <ParamField body="MapId" type="string">
+    Optional Google Cloud map ID for Cloud-based map styling. Leave empty to use the default map style with classic `google.maps.Marker`.
+  </ParamField>
+</Accordion>
+
+<Accordion title="Logging">
+  <ParamField body="LogLevel.Default" type="string">
+    Default minimum log level for all categories. Set to `"Information"` in development. Raise to `"Warning"` or `"Error"` in production to reduce noise.
+  </ParamField>
+  <ParamField body="LogLevel.Microsoft.AspNetCore" type="string">
+    Log level for the ASP.NET Core framework categories. Defaults to `"Warning"` to suppress verbose request-pipeline logs.
+  </ParamField>
+</Accordion>
+
+## Production deployment
+
+<Warning>
+`appsettings.json` is committed to source control and **must never contain real connection strings, API keys, or passwords**. In the repository it holds only Base64-encoded placeholder values. Before deploying to production, supply all secrets through environment variables or a dedicated secrets manager — never by editing `appsettings.json` on the server.
+</Warning>
+
+For production environments, set configuration values using one of these approaches instead of User Secrets (which are a development-only tool):
+
+<Tabs>
+  <Tab title="Environment Variables">
+    ASP.NET Core maps environment variables to configuration keys using `__` (double underscore) as the section separator:
+
+    ```bash
+    # Linux / systemd service or Docker
+    export ConnectionStrings__SqlCon="<base64-logistics-conn>"
+    export ConnectionStrings__SqlConSap="<base64-sap-conn>"
+    export GoogleMaps__ApiKey="<base64-api-key>"
+    ```
+
+    ```powershell
+    # Windows Server / IIS — set in Application Pool advanced settings
+    [System.Environment]::SetEnvironmentVariable("ConnectionStrings__SqlCon", "<base64-value>", "Machine")
+    ```
+  </Tab>
+  <Tab title="Azure Key Vault">
+    Add the `Azure.Extensions.AspNetCore.Configuration.Secrets` NuGet package and register the Key Vault provider in `Program.cs` before your `AddJsonFile` calls:
+
+    ```csharp
+    // Program.cs (production addition)
+    builder.Configuration.AddAzureKeyVault(
+        new Uri("https://<your-vault>.vault.azure.net/"),
+        new DefaultAzureCredential());
+    ```
+
+    Store secrets with the Key Vault naming convention (`ConnectionStrings--SqlCon`, `GoogleMaps--ApiKey`) — Key Vault uses `--` where ASP.NET Core uses `:`.
+  </Tab>
+  <Tab title="Docker Secrets">
+    Pass secrets as Docker environment variables or mount them as files and read with `AddKeyPerFile`:
+
+    ```dockerfile
+    # docker-compose.yml
+    environment:
+      - ConnectionStrings__SqlCon=<base64-value>
+      - ConnectionStrings__SqlConSap=<base64-value>
+      - GoogleMaps__ApiKey=<base64-value>
+    ```
+  </Tab>
+</Tabs>

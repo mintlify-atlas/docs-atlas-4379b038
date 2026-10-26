@@ -1,0 +1,212 @@
+---
+title: "Roles and Module Permissions in Scan4"
+sidebarTitle: "Roles & Permissions"
+description: "Covers the three built-in roles (Admin, Supervisor, Operator), the five module claim system, cookie auth settings, and per-controller access enforcement patterns."
+---
+
+Scan4 uses a two-layer permission model: every authenticated user holds a **role** (stored in `U_Rol` in `SMX_OHEM`) that defines their broad category, and zero or more **module claims** (sourced from `SMX_MDAP`) that grant access to individual sections of the application. The combination of role and module claims is encoded into a cookie at login and checked on every request — no database lookup is required to enforce access within a session.
+
+## The Three Roles
+
+Roles are stored as string codes in the `U_Rol` column of `SMX_OHEM`. The `GetRoles` query reads the display names from `SMX_CATT` where `TYPE_APP = 'ROL'`; a hardcoded fallback is used if that table is empty.
+
+| Code | Name | Default Access |
+|---|---|---|
+| `"1"` | **Administrador** | All five modules, automatically |
+| `"2"` | **Supervisor** | Modules assigned in `SMX_MDAP` |
+| `"3"` | **Operador** | Modules assigned in `SMX_MDAP`; read-only in Users & Vehicles |
+
+<Note>
+  Role `"1"` is the only role that bypasses the module claim check entirely. Controllers accept role `"1"` **or** the matching module claim — Admins never need individual module assignments.
+</Note>
+
+## The Five Modules
+
+Modules are catalogued in `SMX_CATT` where `TYPE_APP = 'MODULO'`. The `GetModules` query provides a fallback table when the catalogue is empty:
+
+| ID | Code | Name | Controller |
+|---|---|---|---|
+| `1` | `DASHBOARD` | Inicio / Dashboard | `DashboardController` |
+| `2` | `RUTAS` | Rutas | `RutasController` |
+| `3` | `REPORTES` | Reportes | `DashboardController` (Reportes action) |
+| `4` | `USUARIOS` | Usuarios / Operadores | `UsuariosController` |
+| `5` | `VEHICULOS` | Vehículos / Configuración | `ConfiguracionController` |
+
+## Claims Issued at Login
+
+When a user authenticates successfully through `POST /Home/Index`, `HomeController` builds a `ClaimsIdentity` with five claim types before signing in:
+
+```csharp
+var claims = new List<Claim>
+{
+    new Claim(ClaimTypes.Name, usuario),   // login username
+    new Claim(ClaimTypes.Role, rol),        // "1", "2", or "3"
+    new Claim("RolName", rolName),          // "Administrador", "Supervisor", "Operador"
+    new Claim("EmpID", empID)               // numeric employee ID from SMX_OHEM
+};
+
+// Role 1 (Admin) gets all modules automatically
+if (rol == "1")
+{
+    claims.Add(new Claim("Module", "1"));
+    claims.Add(new Claim("Module", "2"));
+    claims.Add(new Claim("Module", "3"));
+    claims.Add(new Claim("Module", "4"));
+    claims.Add(new Claim("Module", "5"));
+}
+else
+{
+    // Other roles read their permitted modules from SMX_MDAP
+    DataTable dtModulos = await _modelHome.GetUserModules(usuario, empID);
+    foreach (DataRow row in dtModulos.Rows)
+    {
+        claims.Add(new Claim("Module", row["ID_MODULE"].ToString()));
+    }
+}
+```
+
+Multiple `"Module"` claims are allowed on the same identity (one per granted module). `User.HasClaim("Module", "2")` returns `true` only if a claim with that exact value exists.
+
+## Cookie Authentication Settings
+
+The session cookie is configured in `Program.cs` using `CookieAuthenticationDefaults.AuthenticationScheme`. The authentication properties applied at sign-in time are:
+
+```csharp
+await HttpContext.SignInAsync(
+    CookieAuthenticationDefaults.AuthenticationScheme,
+    principal,
+    new AuthenticationProperties
+    {
+        IsPersistent = false,           // session cookie (cleared on browser close)
+        ExpiresUtc = DateTimeOffset.UtcNow.AddHours(8)
+    }
+);
+```
+
+The 8-hour expiry covers a full working shift. The cookie is **not** marked `IsPersistent`, so it is cleared when the browser session ends regardless of the expiry time.
+
+## Controller Enforcement Pattern
+
+Every protected controller action follows the same guard pattern before loading any data. The example below shows Module 1 (Dashboard):
+
+```csharp
+var userRol = User.FindFirst(ClaimTypes.Role)?.Value ?? "";
+var hasDashboard = userRol == "1" || User.HasClaim("Module", "1");
+
+if (!hasDashboard)
+{
+    return RedirectToAction("SinAcceso", "Home");
+}
+```
+
+Substitute `"Module", "N"` with the relevant module ID for each controller. The same pattern appears in `UsuariosController` (Module `"4"`) and `ConfiguracionController` (Module `"5"`).
+
+## Operator Read-Only Pattern
+
+Controllers that expose write operations also use a dedicated helper to short-circuit mutations for Operators before any validation or SQL runs:
+
+```csharp
+private bool IsOperador()
+{
+    return User.FindFirst(ClaimTypes.Role)?.Value == "3";
+}
+```
+
+This check is the first statement in every `CreateUser`, `EditUser`, `DeleteUser`, `CreateVehiculo`, `EditVehicule`, and `DeleteVehiculo` action:
+
+```csharp
+if (IsOperador())
+{
+    TempData["ErrorUser"] = "Los operadores tienen permisos de solo lectura (no pueden crear usuarios)";
+    return RedirectToAction("Perfil");
+}
+```
+
+The pattern is identical in `ConfiguracionController` — only the `TempData` key and redirect target differ.
+
+## Role × Module Access Matrix
+
+| Module | Admin (`1`) | Supervisor (`2`) | Operator (`3`) |
+|---|---|---|---|
+| Dashboard (`1`) | ✅ Full | ✅ If assigned | ✅ If assigned (read-only) |
+| Rutas (`2`) | ✅ Full | ✅ If assigned | ✅ If assigned |
+| Reportes (`3`) | ✅ Full | ✅ If assigned | ✅ If assigned |
+| Usuarios (`4`) | ✅ Full | ✅ If assigned | 👁️ Read-only |
+| Configuración (`5`) | ✅ Full | ✅ If assigned | 👁️ Read-only |
+
+## Post-Login Redirect Logic
+
+After a successful sign-in (or when an already-authenticated user lands on `/`), `RedirectToFirstAvailableModule` navigates to the first module the user can access, evaluated in priority order:
+
+```csharp
+private IActionResult RedirectToFirstAvailableModule(ClaimsPrincipal user)
+{
+    var rol = user.FindFirst(ClaimTypes.Role)?.Value ?? "";
+    if (rol == "1") // Administrador always lands on Dashboard
+    {
+        return RedirectToAction("Index", "Dashboard");
+    }
+
+    var modules = user.FindAll("Module").Select(c => c.Value).ToHashSet();
+
+    if (modules.Contains("1")) return RedirectToAction("Index", "Dashboard");
+    if (modules.Contains("2")) return RedirectToAction("Rutas", "Rutas");
+    if (modules.Contains("3")) return RedirectToAction("Reportes", "Dashboard");
+    if (modules.Contains("4")) return RedirectToAction("Perfil", "Usuarios");
+    if (modules.Contains("5")) return RedirectToAction("Configuracion", "Configuracion");
+
+    return RedirectToAction("SinAcceso", "Home");
+}
+```
+
+The priority order is: **Dashboard → Rutas → Reportes → Usuarios → Configuración**. A user with only Module `"4"` assigned will always land on the Users/Perfil page after login.
+
+## Managing Module Assignments
+
+<Tip>
+  To grant or revoke module access for a Supervisor or Operator, edit their user record in the **Usuarios** module and adjust the **Módulos Seleccionados** checkboxes. The model layer calls `DeleteUserModules` to wipe existing rows and then `InsertUserModule` once per selected module — no manual SQL is needed.
+
+  If you need to bulk-update modules directly in the database, use these two queries:
+
+  ```sql
+  -- Grant a module
+  -- Queries:InsertUserModule
+  INSERT INTO SMX_MDAP ([empID], [CODE], [ID_MODULE], [ACTIVE])
+  VALUES (@empID, @User, @ID_MODULE, 1)
+
+  -- Remove all modules for a user
+  -- Queries:DeleteUserModules
+  DELETE FROM SMX_MDAP WHERE [CODE] = @User
+  ```
+
+  Changes take effect on the user's **next login** — the claims in their current cookie are not updated until they re-authenticate.
+</Tip>
+
+## Module Lookup at Login
+
+For non-Admin roles, permitted modules are read from `SMX_MDAP` at login time:
+
+```sql
+-- Queries:GetUserModules
+SELECT [ID_MODULE]
+FROM SMX_MDAP
+WHERE ([CODE] = @User
+   OR ([empID] IS NOT NULL AND @empID <> '' AND [empID] = @empID))
+  AND [ACTIVE] = 1
+```
+
+The query accepts both the username (`CODE`) and numeric employee ID (`empID`) to handle accounts that may have been created under either identifier.
+
+## Related Pages
+
+<CardGroup cols={3}>
+  <Card title="Users" icon="users" href="/admin/users">
+    Create and manage user accounts and their module assignments in SMX_OHEM.
+  </Card>
+  <Card title="Vehicles" icon="truck" href="/admin/vehicles">
+    Manage the delivery fleet available to route planners in the Rutas module.
+  </Card>
+  <Card title="Architecture: Security" icon="lock" href="/architecture/security">
+    Deep-dive into the encryption helper, cookie configuration, and session lifetime.
+  </Card>
+</CardGroup>

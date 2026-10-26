@@ -1,0 +1,473 @@
+---
+title: "Rutas Controller: Persist, Reassign, and Finalize Routes"
+sidebarTitle: "Rutas Controller"
+description: "Reference for the MVC JSON actions in RutasController that save routes to SQL Server, reassign operators, reschedule dates, and finalize deliveries."
+---
+
+The **Rutas Controller** (`/Rutas/*`) is an ASP.NET Core MVC controller — not `[ApiController]` — that persists routes to SQL Server via `RutasModel` and exposes JSON actions consumed by the Scan4 frontend JavaScript (`rutas.js`, `rutas2.js`). Unlike the `/api/rutas-mapa` in-memory endpoints, all write operations here go to the `LOG_Rutas` and `LOG_Rutas_Destinos` tables in the configured database.
+
+<Warning>
+  All endpoints in this controller require an authenticated session cookie (`[Authorize]`). Unauthenticated requests are redirected to the login page. Operators (role `3`) are silently blocked from all write actions (`GuardarRuta`, `ReasignarOperador`, `ReprogramarFecha`, `FinalizarRuta`) — the server returns `403 Forbidden` without an error body.
+</Warning>
+
+---
+
+## Authentication & Authorization
+
+The controller is decorated with `[Authorize]` at the class level. Role checks are performed inline using the `IsOperador()` helper, which reads the `ClaimTypes.Role` claim from the cookie session:
+
+```csharp
+private bool IsOperador()
+{
+    return User.FindFirst(ClaimTypes.Role)?.Value == "3";
+}
+```
+
+| Role value | Read access | Write access |
+|------------|-------------|--------------|
+| `1` (Admin) | ✅ All routes | ✅ All actions |
+| `2` (Supervisor) | ✅ All routes | ✅ All actions |
+| `3` (Operador) | ✅ Own routes only | ❌ Returns `403` |
+
+Operators also have their **route list filtered** server-side: `ObtenerRutas` injects the session's `ClaimTypes.Name` and `EmpID` claim into `RutasModel.ObtenerRutasAsync` to return only that driver's routes.
+
+---
+
+## GET /Rutas/ObtenerRutas
+
+Returns all routes and their stops from the `LOG_Rutas` and `LOG_Rutas_Destinos` tables. For authenticated operators, results are automatically filtered to their own routes.
+
+<Tabs>
+  <Tab title="Request">
+    ```http
+    GET /Rutas/ObtenerRutas HTTP/1.1
+    Cookie: .AspNetCore.Cookies=<session>
+    ```
+
+    No query parameters or request body.
+  </Tab>
+  <Tab title="Response 200">
+    Returns a JSON array of route objects. The exact shape is determined by `RutasModel.ObtenerRutasAsync`, which projects columns from `LOG_Rutas` joined with `LOG_Rutas_Destinos`.
+
+    ```json
+    [
+      {
+        "idRuta": 12,
+        "codigoRuta": "CDMX-20260709-001",
+        "nombreRuta": "Ruta Centro Julio 9",
+        "fechaRuta": "2026-07-09T00:00:00",
+        "nombreOperador": "María García",
+        "nombreVehiculo": "Unidad 102",
+        "origenDireccion": "San Francisco 1107, Colonia del Valle, Benito Juárez, 03100 Ciudad de México, CDMX",
+        "distanciaKm": 12.40,
+        "tiempoEstimadoMin": 35,
+        "estatus": "Activa",
+        "destinos": [...]
+      }
+    ]
+    ```
+
+    <ResponseField name="[].idRuta" type="integer">Auto-assigned primary key from `LOG_Rutas`.</ResponseField>
+    <ResponseField name="[].codigoRuta" type="string | null">Optional human-readable route code. May be `null` if not provided at creation.</ResponseField>
+    <ResponseField name="[].nombreRuta" type="string">Route display name.</ResponseField>
+    <ResponseField name="[].fechaRuta" type="string (ISO 8601)">Scheduled date of the route.</ResponseField>
+    <ResponseField name="[].nombreOperador" type="string">Resolved operator name from the join with the users table.</ResponseField>
+    <ResponseField name="[].nombreVehiculo" type="string">Resolved vehicle name from the vehicles table.</ResponseField>
+    <ResponseField name="[].origenDireccion" type="string">Full address of the departure point.</ResponseField>
+    <ResponseField name="[].distanciaKm" type="number">Total route distance in km.</ResponseField>
+    <ResponseField name="[].tiempoEstimadoMin" type="integer">Estimated travel time in minutes.</ResponseField>
+    <ResponseField name="[].estatus" type="string">Current route status (e.g. `"Activa"`, `"Finalizada"`).</ResponseField>
+    <ResponseField name="[].destinos" type="array">Ordered list of delivery stops for this route.</ResponseField>
+  </Tab>
+  <Tab title="Response 500">
+    Returns a JSON error body if an unhandled exception occurs in the model layer.
+
+    ```json
+    { "error": "Timeout expired. The timeout period elapsed prior to completion of the operation or the server is not responding." }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /Rutas/GuardarRuta
+
+Persists a complete route with all its stops to SQL Server. Triggers the stored procedure or parameterized insert behind `RutasModel.GuardarRutaCompletaAsync`, which writes to `LOG_Rutas` and `LOG_Rutas_Destinos` in a single transaction and auto-generates the `codigoRuta` if one is not provided.
+
+<Warning>
+  Operators (role `3`) receive `403 Forbidden`. The request must include at least one destination in `destinos`, otherwise `400 Bad Request` is returned.
+</Warning>
+
+<Tabs>
+  <Tab title="Request">
+    ```http
+    POST /Rutas/GuardarRuta HTTP/1.1
+    Content-Type: application/json
+    Cookie: .AspNetCore.Cookies=<session>
+    ```
+
+    ```json
+    {
+      "codigoRuta": null,
+      "nombreRuta": "Ruta Centro Julio 9",
+      "fechaRuta": "2026-07-09T00:00:00",
+      "idOperador": 4,
+      "idVehiculo": 2,
+      "origenDireccion": "San Francisco 1107, Colonia del Valle, Benito Juárez, 03100 Ciudad de México, CDMX",
+      "origenLat": 19.3746,
+      "origenLng": -99.1743,
+      "distanciaKm": 12.40,
+      "tiempoEstimadoMin": 35,
+      "destinos": [
+        {
+          "idDestino": 0,
+          "ordenSecuencia": 1,
+          "rfc": "GABC820305ABC",
+          "cardCode": "C001234",
+          "cardName": "Grupo ABC S.A. de C.V.",
+          "direccion": "Presidente Masaryk 101, Polanco, CDMX",
+          "telefono": "5555550100",
+          "contacto": "Ana López",
+          "city": "Ciudad de México",
+          "latitud": 19.433,
+          "longitud": -99.2,
+          "tipoDocumento": "Factura",
+          "folioDocumento": "F-00234",
+          "prioridad": "Alta",
+          "fechaCompromiso": "2026-07-09T00:00:00",
+          "horarioEntrega": "09:00–11:00",
+          "observaciones": "Entregar en recepción",
+          "estatusEntrega": "Pendiente"
+        }
+      ]
+    }
+    ```
+
+    <ParamField body="codigoRuta" type="string | null">
+      Optional human-readable route code. Pass `null` to have the system auto-generate one.
+    </ParamField>
+    <ParamField body="nombreRuta" type="string" required>
+      Route display name shown in the dashboard.
+    </ParamField>
+    <ParamField body="fechaRuta" type="string (ISO 8601)" required>
+      Scheduled date of the route. Defaults to `DateTime.Today` if not provided.
+    </ParamField>
+    <ParamField body="idOperador" type="integer" required>
+      Foreign key to the operators table. Must reference a valid active operator.
+    </ParamField>
+    <ParamField body="idVehiculo" type="integer" required>
+      Foreign key to the vehicles table. Must reference an available vehicle.
+    </ParamField>
+    <ParamField body="origenDireccion" type="string">
+      Full address of the departure point. Defaults to `"San Francisco 1107, Colonia del Valle, Benito Juárez, 03100 Ciudad de México, CDMX"`.
+    </ParamField>
+    <ParamField body="origenLat" type="number">
+      Departure point latitude. Defaults to `19.3746`.
+    </ParamField>
+    <ParamField body="origenLng" type="number">
+      Departure point longitude. Defaults to `-99.1743`.
+    </ParamField>
+    <ParamField body="distanciaKm" type="number">
+      Total route distance in km, calculated client-side.
+    </ParamField>
+    <ParamField body="tiempoEstimadoMin" type="integer">
+      Estimated travel time in minutes, calculated client-side.
+    </ParamField>
+    <ParamField body="destinos" type="array of DestinoRutaDTO" required>
+      Ordered list of delivery stops. Must contain at least one entry.
+      <Expandable title="DestinoRutaDTO fields">
+        <ParamField body="idDestino" type="integer">
+          `0` for new stops; the existing `ID` when updating. Aliased as `ID` in the C# model.
+        </ParamField>
+        <ParamField body="ordenSecuencia" type="integer" required>
+          1-based delivery sequence position within the route.
+        </ParamField>
+        <ParamField body="rfc" type="string | null">
+          Client RFC (Registro Federal de Contribuyentes). Stored as `LicTradNum` in the database.
+        </ParamField>
+        <ParamField body="cardCode" type="string | null">
+          SAP Business Partner code (e.g. `"C001234"`).
+        </ParamField>
+        <ParamField body="cardName" type="string" required>
+          Client or business name for this stop.
+        </ParamField>
+        <ParamField body="direccion" type="string" required>
+          Full delivery address. Stored as `Address` in the database.
+        </ParamField>
+        <ParamField body="telefono" type="string | null">
+          Contact phone number. Stored as `Phone1`.
+        </ParamField>
+        <ParamField body="contacto" type="string | null">
+          Contact person name. Stored as `CntctPrsn`.
+        </ParamField>
+        <ParamField body="city" type="string | null">
+          City name for the delivery address.
+        </ParamField>
+        <ParamField body="latitud" type="number" required>
+          Stop latitude in decimal degrees.
+        </ParamField>
+        <ParamField body="longitud" type="number" required>
+          Stop longitude in decimal degrees.
+        </ParamField>
+        <ParamField body="tipoDocumento" type="string">
+          Document type associated with this stop: `"Factura"` (default), `"Remisión"`, etc.
+        </ParamField>
+        <ParamField body="folioDocumento" type="string | null">
+          Document folio or reference number (e.g. `"F-00234"`).
+        </ParamField>
+        <ParamField body="prioridad" type="string">
+          Stop-level priority: `"Alta"`, `"Media"` (default), or `"Baja"`.
+        </ParamField>
+        <ParamField body="fechaCompromiso" type="string (ISO 8601) | null">
+          Committed delivery date for this stop. Defaults to `DateTime.Today`.
+        </ParamField>
+        <ParamField body="horarioEntrega" type="string | null">
+          Delivery time window (e.g. `"09:00–11:00"`).
+        </ParamField>
+        <ParamField body="observaciones" type="string | null">
+          Free-text delivery notes.
+        </ParamField>
+        <ParamField body="estatusEntrega" type="string">
+          Initial stop status. Defaults to `"Pendiente"`. Stored as `Estatus`.
+        </ParamField>
+      </Expandable>
+    </ParamField>
+  </Tab>
+  <Tab title="Response 200">
+    Returned when the route and all its stops are saved successfully.
+
+    ```json
+    {
+      "exito": true,
+      "idRuta": 12,
+      "codigoRuta": "CDMX-20260709-001",
+      "mensaje": "Ruta guardada exitosamente."
+    }
+    ```
+
+    <ResponseField name="exito" type="boolean">`true` on success.</ResponseField>
+    <ResponseField name="idRuta" type="integer">Auto-assigned primary key of the new route in `LOG_Rutas`.</ResponseField>
+    <ResponseField name="codigoRuta" type="string">Auto-generated or user-supplied route code.</ResponseField>
+    <ResponseField name="mensaje" type="string">Human-readable success message from the model layer.</ResponseField>
+  </Tab>
+  <Tab title="Response 400">
+    Returned when the DTO is null, `destinos` is empty, or the model layer returns a business-rule failure.
+
+    ```json
+    {
+      "exito": false,
+      "mensaje": "La ruta debe incluir al menos un destino."
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /Rutas/ReasignarOperador
+
+Reassigns an existing route to a different operator without changing any other route data.
+
+<Tabs>
+  <Tab title="Request">
+    ```http
+    POST /Rutas/ReasignarOperador HTTP/1.1
+    Content-Type: application/json
+    Cookie: .AspNetCore.Cookies=<session>
+    ```
+
+    ```json
+    {
+      "idRuta": 12,
+      "idOperador": 7
+    }
+    ```
+
+    <ParamField body="idRuta" type="integer" required>
+      The ID of the route to reassign. Must be greater than `0`.
+    </ParamField>
+    <ParamField body="idOperador" type="integer" required>
+      The ID of the new operator. Must be greater than `0` and reference a valid active user.
+    </ParamField>
+  </Tab>
+  <Tab title="Response 200">
+    ```json
+    {
+      "exito": true,
+      "mensaje": "Operador reasignado correctamente."
+    }
+    ```
+
+    <ResponseField name="exito" type="boolean">`true` when the update was applied.</ResponseField>
+    <ResponseField name="mensaje" type="string">Confirmation message from the model layer.</ResponseField>
+  </Tab>
+  <Tab title="Response 400">
+    Returned when either `idRuta` or `idOperador` is missing or zero.
+
+    ```json
+    {
+      "exito": false,
+      "mensaje": "Ruta y Operador válidos son requeridos."
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /Rutas/ReprogramarFecha
+
+Updates the scheduled date of an existing route. Use this when a route must be deferred to a later day without rebuilding it from scratch.
+
+<Tabs>
+  <Tab title="Request">
+    ```http
+    POST /Rutas/ReprogramarFecha HTTP/1.1
+    Content-Type: application/json
+    Cookie: .AspNetCore.Cookies=<session>
+    ```
+
+    ```json
+    {
+      "idRuta": 12,
+      "nuevaFecha": "2026-07-11T00:00:00"
+    }
+    ```
+
+    <ParamField body="idRuta" type="integer" required>
+      The ID of the route to reschedule. Must be greater than `0`.
+    </ParamField>
+    <ParamField body="nuevaFecha" type="string (ISO 8601)" required>
+      The new scheduled date. Must not be `DateTime.MinValue`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response 200">
+    ```json
+    {
+      "exito": true,
+      "mensaje": "Fecha reprogramada correctamente."
+    }
+    ```
+
+    <ResponseField name="exito" type="boolean">`true` when the date was updated.</ResponseField>
+    <ResponseField name="mensaje" type="string">Confirmation message from the model layer.</ResponseField>
+  </Tab>
+  <Tab title="Response 400">
+    Returned when `idRuta` is zero or `nuevaFecha` equals `DateTime.MinValue`.
+
+    ```json
+    {
+      "exito": false,
+      "mensaje": "Ruta y fecha válida son requeridas."
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /Rutas/FinalizarRuta
+
+Marks a route and all its pending delivery stops as finalized. This is a terminal operation — the route status transitions to `"Finalizada"` in `LOG_Rutas` and all associated `LOG_Rutas_Destinos` records are closed out.
+
+<Tabs>
+  <Tab title="Request">
+    ```http
+    POST /Rutas/FinalizarRuta HTTP/1.1
+    Content-Type: application/json
+    Cookie: .AspNetCore.Cookies=<session>
+    ```
+
+    ```json
+    {
+      "idRuta": 12
+    }
+    ```
+
+    <ParamField body="idRuta" type="integer" required>
+      The ID of the route to finalize. Must be greater than `0`.
+    </ParamField>
+  </Tab>
+  <Tab title="Response 200">
+    ```json
+    {
+      "exito": true,
+      "mensaje": "Ruta finalizada correctamente."
+    }
+    ```
+
+    <ResponseField name="exito" type="boolean">`true` when the route was finalized.</ResponseField>
+    <ResponseField name="mensaje" type="string">Confirmation message from the model layer.</ResponseField>
+  </Tab>
+  <Tab title="Response 400">
+    Returned when `idRuta` is zero or the DTO is null.
+
+    ```json
+    {
+      "exito": false,
+      "mensaje": "ID de ruta inválido."
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## GET /Rutas/GetClienteDetalle
+
+Auto-fills the destination form with SAP Business Partner data when the dispatcher selects a client by RFC in the *Armar ruta* modal. Queries the specified SAP database directly.
+
+<Tabs>
+  <Tab title="Request">
+    ```http
+    GET /Rutas/GetClienteDetalle?bd=SMXGDL_PROD&rfc=GABC820305ABC HTTP/1.1
+    Cookie: .AspNetCore.Cookies=<session>
+    ```
+
+    <ParamField query="bd" type="string" required>
+      Target SAP database name (e.g. `"SMXGDL_PROD"`, `"SMXMTY_PROD"`). Used to select the correct company database in the multi-company setup.
+    </ParamField>
+    <ParamField query="rfc" type="string" required>
+      Client RFC to look up. Queried against the `LicTradNum` column in the SAP Business Partners table. If the RFC is registered under multiple `CardCode` entries, the first row is returned.
+    </ParamField>
+  </Tab>
+  <Tab title="Response 200">
+    Returns a flat object with the fields needed to auto-populate the destination form.
+
+    ```json
+    {
+      "cardCode": "C001234",
+      "cardName": "Grupo ABC S.A. de C.V.",
+      "address": "Presidente Masaryk 101, Polanco, CDMX",
+      "phone": "5555550100",
+      "contact": "Ana López",
+      "city": "Ciudad de México"
+    }
+    ```
+
+    <ResponseField name="cardCode" type="string">SAP Business Partner code.</ResponseField>
+    <ResponseField name="cardName" type="string">Legal business name.</ResponseField>
+    <ResponseField name="address" type="string">Primary delivery address from the SAP record.</ResponseField>
+    <ResponseField name="phone" type="string">Primary phone number (`Phone1` column).</ResponseField>
+    <ResponseField name="contact" type="string">Default contact person (`CntctPrsn` column).</ResponseField>
+    <ResponseField name="city" type="string">City of the delivery address.</ResponseField>
+  </Tab>
+  <Tab title="Response 400">
+    Returned when either `bd` or `rfc` is missing or empty.
+
+    ```json
+    { "error": "Parámetros requeridos: bd, rfc" }
+    ```
+  </Tab>
+  <Tab title="Response 404">
+    Returned when no Business Partner with the given RFC is found in the specified database.
+
+    ```json
+    { "error": "Cliente no encontrado" }
+    ```
+  </Tab>
+</Tabs>
+
+<Info>
+  `GetClienteDetalle` is a read-only lookup — it does not write to the Scan4 database. The `bd` parameter selects the SAP company database so that a single Scan4 instance can serve multiple ScanMex subsidiaries. Make sure the SQL user configured in `appsettings.json` has `SELECT` access to the target SAP database.
+</Info>

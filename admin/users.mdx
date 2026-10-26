@@ -1,0 +1,269 @@
+---
+title: "User Management: Create, Edit, and Deactivate Users"
+sidebarTitle: "Users"
+description: "Manage ScanMex staff accounts in SMX_OHEM: create users with role and module assignments, edit profiles, change passwords, and soft-delete inactive accounts."
+---
+
+The Users module (Module 4) is the central hub for managing ScanMex operator and supervisor accounts in Scan4. Administrators can register new users, update profiles and role assignments, grant per-module permissions, and soft-delete accounts that are no longer active — all without ever removing a record from the `SMX_OHEM` table. Non-admin users can be granted access to this module via the `SMX_MDAP` permissions table.
+
+<Warning>
+  Operators (role `3`) have **read-only** access to the Users module. Any attempt to create, edit, or delete a user returns immediately to the `Perfil` view with a `TempData["ErrorUser"]` message: _"Los operadores tienen permisos de solo lectura."_ No data is written.
+</Warning>
+
+## Access Control
+
+Access is evaluated at the top of `UsuariosController.Perfil()` before any data is loaded:
+
+```csharp
+var userRol = User.FindFirst(ClaimTypes.Role)?.Value ?? "";
+var hasUsuarios = userRol == "1" || User.HasClaim("Module", "4");
+
+if (!hasUsuarios)
+{
+    return RedirectToAction("SinAcceso", "Home");
+}
+```
+
+Users who satisfy neither condition are redirected to the **Sin Acceso** page immediately.
+
+## User Fields
+
+Every user account is stored in `SMX_OHEM` and is modelled by `UsuariosClass` for creation and `UsuariosEditClass` for updates.
+
+<Tabs>
+  <Tab title="Create — UsuariosClass">
+    <ParamField body="Usuario" type="string" required>
+      Unique login username. Must not already exist in `SMX_OHEM`. Validated with a `SearchUser` query before insert.
+    </ParamField>
+    <ParamField body="Nombre" type="string" required>
+      Employee first name (`firstName` column).
+    </ParamField>
+    <ParamField body="Apellido" type="string" required>
+      Employee last name (`LastName` column).
+    </ParamField>
+    <ParamField body="Correo" type="string" required>
+      Corporate email. **Must contain `scanmex.com`** — any other domain is rejected with an error message.
+    </ParamField>
+    <ParamField body="Telefono" type="string" required>
+      Mobile or office phone (`Mobile` column). Stored as nullable.
+    </ParamField>
+    <ParamField body="Rol" type="string" required>
+      Role code: `"1"` = Administrador, `"2"` = Supervisor, `"3"` = Operador. Stored in the `U_Rol` column.
+    </ParamField>
+    <ParamField body="Password" type="string" required>
+      Plaintext password submitted via form. Encrypted with `SecurityHelper.Encriptar()` before persisting.
+    </ParamField>
+    <ParamField body="ConfirmarPassword" type="string" required>
+      Must match `Password` exactly, checked in the controller before the insert.
+    </ParamField>
+    <ParamField body="ModulosSeleccionados" type="List<string>">
+      Module IDs (e.g. `["1","2","3"]`) to assign in `SMX_MDAP`. Ignored for role `"1"` (Admin receives all modules automatically).
+    </ParamField>
+  </Tab>
+  <Tab title="Edit — UsuariosEditClass">
+    <ParamField body="EditUsuario" type="string" required>
+      Username identifying the record to update (used in the `WHERE [User] = @User` clause).
+    </ParamField>
+    <ParamField body="EditNombre" type="string" required>
+      Updated first name.
+    </ParamField>
+    <ParamField body="EditApellido" type="string" required>
+      Updated last name.
+    </ParamField>
+    <ParamField body="EditCorreo" type="string" required>
+      Updated corporate email. Same `scanmex.com` domain check applies.
+    </ParamField>
+    <ParamField body="EditTelefono" type="string" required>
+      Updated phone number.
+    </ParamField>
+    <ParamField body="EditRol" type="string" required>
+      Updated role code.
+    </ParamField>
+    <ParamField body="EditEstado" type="string" required>
+      Active flag: `"1"` = active, `"0"` = inactive. Maps to the `Active` column.
+    </ParamField>
+    <ParamField body="EditPassword" type="string">
+      New password. **Optional** — if omitted, the password column is not modified and the `EditUser` query is used; if provided, `EditUserPassword` is used instead.
+    </ParamField>
+    <ParamField body="EditConfirmarPassword" type="string">
+      Required only when `EditPassword` is supplied. Must match exactly.
+    </ParamField>
+    <ParamField body="EditModulosSeleccionados" type="List<string>">
+      Replacement module list. The previous `SMX_MDAP` rows for the user are deleted, then new rows are inserted. Ignored if role is changed to `"1"`.
+    </ParamField>
+  </Tab>
+</Tabs>
+
+## Endpoints
+
+### Create a User
+
+```http
+POST /Usuarios/CreateUser
+Content-Type: application/x-www-form-urlencoded
+```
+
+Form-bound to `UsuariosClass`. The controller validates all fields, checks domain, compares passwords, and then executes `InsertNewUser`:
+
+```sql
+-- Queries:InsertNewUser
+INSERT INTO SMX_OHEM (
+  [empID],[User],[firstName],[LastName],
+  [Email],[Password],[U_Rol],[Active],[FechaAlta],[Mobile]
+)
+VALUES (
+  @empID, @User, @firstName, @lastName,
+  @email, @Password, @U_Rol, @Active, GETDATE(), @Mobile
+)
+```
+
+The `empID` is generated at runtime using `GetNextEmpId`, which increments the current maximum integer `empID` in the table (minimum value: `10`).
+
+After the user row is inserted, if the new user's role is not `"1"` and at least one module was selected, each module is inserted into `SMX_MDAP` via `InsertUserModule`:
+
+```sql
+-- Queries:InsertUserModule
+INSERT INTO SMX_MDAP ([empID], [CODE], [ID_MODULE], [ACTIVE])
+VALUES (@empID, @User, @ID_MODULE, 1)
+```
+
+On success, `TempData["UserCreated"]` is set and the browser redirects to `Perfil`.
+
+---
+
+### Edit a User
+
+```http
+POST /Usuarios/EditUser
+Content-Type: application/x-www-form-urlencoded
+```
+
+Form-bound to `UsuariosEditClass`. Selects between two SQL queries at runtime:
+
+```csharp
+// Without password change
+query = _Sql["Queries:EditUser"];
+
+// With password change
+query = _Sql["Queries:EditUserPassword"];
+```
+
+```sql
+-- Queries:EditUser
+UPDATE SMX_OHEM
+SET firstName = @firstName, LastName = @lastName, Email = @email,
+    U_Rol = @U_Rol, Active = @Active, Mobile = @Mobile
+WHERE [User] = @User
+
+-- Queries:EditUserPassword  (adds the Password column)
+UPDATE SMX_OHEM
+SET firstName = @firstName, LastName = @lastName, Email = @email,
+    U_Rol = @U_Rol, Active = @Active, Mobile = @Mobile,
+    [Password] = @Password
+WHERE [User] = @User
+```
+
+Module assignments in `SMX_MDAP` are always refreshed after the user row update. If the role was changed **to** `"1"` (Admin), all module rows for the user are deleted (`DeleteUserModules`) because Admins receive all modules automatically at login.
+
+---
+
+### Soft-Delete a User
+
+```http
+GET /Usuarios/DeleteUser?id={username}
+```
+
+Sets `Active = 0` in `SMX_OHEM` — the record is **never physically removed**. Module permission rows in `SMX_MDAP` are also deactivated (`ACTIVE = 0`) in the same request.
+
+```sql
+-- Queries:DeleteUser
+UPDATE SMX_OHEM SET Active = 0 WHERE [User] = @User
+```
+
+On success, `TempData["UserEdited"]` contains _"Usuario inhabilitado correctamente"_ and `TempData["ck_SelectedInput"]` is set to `"edicion"` to trigger the edit tab in the UI.
+
+---
+
+### Get User Modules (JSON)
+
+```http
+GET /Usuarios/GetModulosUsuario?usuario={username}
+```
+
+Returns an array of module ID strings currently active in `SMX_MDAP` for the given user. Used by the front-end to pre-select checkboxes in the edit form.
+
+```sql
+-- Queries:GetUserModules
+SELECT [ID_MODULE]
+FROM SMX_MDAP
+WHERE ([CODE] = @User
+   OR ([empID] IS NOT NULL AND @empID <> '' AND [empID] = @empID))
+  AND [ACTIVE] = 1
+```
+
+**Response example:**
+
+```json
+["2", "3", "4"]
+```
+
+## Step-by-Step: Creating a New User
+
+<Steps>
+  <Step title="Open the Users module">
+    Navigate to **Usuarios → Perfil** in the sidebar. The page loads a `DataSet` with three tables: active users (`SMX_OHEM`), available roles (`SMX_CATT` where `TYPE_APP = 'ROL'`), and available modules (`SMX_CATT` where `TYPE_APP = 'MODULO'`).
+  </Step>
+  <Step title="Fill in the creation form">
+    Complete every field in the **Nuevo Usuario** panel: username, first name, last name, a `scanmex.com` email address, phone, role, and password with confirmation.
+  </Step>
+  <Step title="Assign modules (non-Admin roles)">
+    If the selected role is **Supervisor** (`2`) or **Operador** (`3`), check the modules the user should be able to access. Admins do not need this step — all modules are granted automatically.
+  </Step>
+  <Step title="Submit">
+    POST to `POST /Usuarios/CreateUser`. Watch for a green success banner (`TempData["UserCreated"]`) or a red error banner (`TempData["ErrorUser"]`).
+  </Step>
+</Steps>
+
+## Relevant SQL Reference
+
+<Accordion title="SelectUsers — list all active accounts">
+```sql
+SELECT [ID], [empID], [User], [firstName], [LastName] as [lastName],
+       [Email] as [email], [Mobile], [U_Rol], [Password], [Active], [FechaAlta]
+FROM SMX_OHEM
+WHERE [Active] = 1
+ORDER BY [ID] DESC
+```
+</Accordion>
+
+<Accordion title="GetUser — authenticate and resolve role name">
+```sql
+SELECT T0.[ID], T0.[empID], T0.[User], T0.[firstName], T0.[LastName],
+       T0.[Email], T0.[U_Rol],
+       CASE WHEN T0.[U_Rol] = '1' THEN 'Administrador'
+            WHEN T0.[U_Rol] = '2' THEN 'Supervisor'
+            WHEN T0.[U_Rol] = '3' THEN 'Operador'
+            ELSE 'Usuario' END as [RolName]
+FROM SMX_OHEM T0
+WHERE (T0.[User] = @User OR T0.[Email] = @User)
+  AND (T0.[Password] = @PasswordEncrypted OR T0.[Password] = @PasswordPlain)
+  AND T0.[Active] = 1
+```
+</Accordion>
+
+<Accordion title="DeleteUserModules — clear module assignments before refresh">
+```sql
+DELETE FROM SMX_MDAP WHERE [CODE] = @User
+```
+</Accordion>
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="Roles & Permissions" icon="shield-halved" href="/admin/roles-permissions">
+    Understand the three-role system and how module claims are enforced across every controller.
+  </Card>
+  <Card title="Configuration — Vehicles" icon="truck" href="/admin/vehicles">
+    Manage the delivery vehicle fleet available to route planners.
+  </Card>
+</CardGroup>

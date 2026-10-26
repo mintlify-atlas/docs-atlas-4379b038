@@ -1,0 +1,230 @@
+---
+title: "Google Maps Integration: Routes and Geocoding"
+sidebarTitle: "Google Maps"
+description: "How Scan4 loads the Maps JavaScript API in Razor views, calls the server-side Routes API, manages the API key securely, and handles classic markers without a Map ID."
+---
+
+Scan4 uses Google Maps in two distinct ways. In the browser, the **Maps JavaScript API** renders interactive delivery maps with numbered markers and a live `DirectionsService` polyline. On the server, **`RutasModel.CalcularRutaGoogleAsync()`** calls the **Routes API** via `HttpClient` to compute distances and travel times for a route. Both surfaces use the same API key, configured via .NET User Secrets in development and injected through `IOptions<GoogleMapsOptions>` in the application.
+
+## Two Google Maps Surfaces
+
+<CardGroup cols={2}>
+  <Card title="Maps JavaScript API (Client-Side)" icon="globe">
+    Loaded in Razor views through a `<script>` tag that appends the decrypted key from `ViewBag.GoogleMapsApiKey`. Drives the interactive map in the "Armar ruta" modal and the "Nueva ruta" form.
+
+    **Files**: `armar-ruta-mapa.js`, `nueva-ruta-integracion.js`
+  </Card>
+  <Card title="Routes API (Server-Side)" icon="server">
+    Called from `RutasModel.CalcularRutaGoogleAsync()` via `HttpClient`. Sends a POST to `https://routes.googleapis.com/directions/v2:computeRoutes` with `X-Goog-Api-Key` and `X-Goog-FieldMask` headers.
+
+    **File**: `Models/RutasModel.cs`
+  </Card>
+</CardGroup>
+
+## GoogleMapsOptions Model
+
+The strongly-typed options class carries the decoded API key and an optional Map ID:
+
+```csharp
+// Models/Mapas/GoogleMapsOptions.cs
+public class GoogleMapsOptions
+{
+    public string ApiKey { get; set; } = string.Empty;
+
+    // Optional: Map ID from Google Cloud Console for custom map styles
+    // or Advanced Markers (not currently used — see "Classic Markers" below).
+    public string MapId { get; set; } = string.Empty;
+}
+```
+
+The options are populated in `Program.cs` during startup. The raw key stored in configuration is Base64-encoded, so it is decoded with `SecurityHelper.Desencriptar()` before being assigned:
+
+```csharp
+// Program.cs — GoogleMapsOptions registration
+builder.Services.Configure<GoogleMapsOptions>(options =>
+{
+    var rawKey = builder.Configuration["GoogleMaps:ApiKey"] ?? "";
+    options.ApiKey = Pedidoslogistica.Helpers.SecurityHelper.Desencriptar(rawKey);
+    options.MapId  = builder.Configuration["GoogleMaps:MapId"] ?? "";
+});
+```
+
+Controllers that need to pass the key to a Razor view inject `IOptions<GoogleMapsOptions>` and assign it to `ViewBag.GoogleMapsApiKey`:
+
+```csharp
+// RutasController.cs — injecting the key into ViewBag
+private readonly IOptions<GoogleMapsOptions> _mapsOptions;
+
+public RutasController(/* ... */ IOptions<GoogleMapsOptions> mapsOptions)
+{
+    _mapsOptions = mapsOptions;
+}
+
+public async Task<IActionResult> Rutas()
+{
+    ViewBag.GoogleMapsApiKey = _mapsOptions.Value.ApiKey;
+    // ...
+    return View(model);
+}
+```
+
+## Configuration Loading Order
+
+`appsettings.json` and `GoogleMaps/GoogleMaps.json` contain only a Base64-encoded placeholder key. The real key comes from .NET User Secrets in development. Because `WebApplication.CreateBuilder()` loads User Secrets **before** the explicit `AddJsonFile` calls, the placeholder in `GoogleMaps.json` would silently overwrite the real secret unless secrets are re-added afterward.
+
+`Program.cs` corrects this by adding User Secrets a second time, after all JSON files, so they always win:
+
+```csharp
+// Program.cs — configuration loading order
+builder.Configuration.AddJsonFile("Queries/Queries.json",    optional: false, reloadOnChange: true);
+builder.Configuration.AddJsonFile("GoogleMaps/GoogleMaps.json", optional: false, reloadOnChange: true);
+
+// Re-add User Secrets AFTER the JSON files so the real ApiKey is never
+// overwritten by the placeholder value in GoogleMaps.json.
+if (builder.Environment.IsDevelopment())
+{
+    builder.Configuration.AddUserSecrets<Program>(optional: true);
+}
+```
+
+<Warning>
+  The value stored in `GoogleMaps/GoogleMaps.json` is intentionally a Base64-encoded placeholder. **Never replace it with a real API key in that file** — the file is committed to source control. Use .NET User Secrets during development (`dotnet user-secrets set "GoogleMaps:ApiKey" "<base64-encoded-key>"`) and environment variables or a secret manager in production.
+</Warning>
+
+## Server-Side Routes API Call
+
+`RutasModel.CalcularRutaGoogleAsync()` sends a `POST` request to the Routes API v2 endpoint. The `X-Goog-FieldMask` header limits the response to only the fields the server needs — duration, distance, and the encoded polyline:
+
+```csharp
+// Models/RutasModel.cs — server-side Routes API call
+public async Task<string> CalcularRutaGoogleAsync()
+{
+    var apiKey = SecurityHelper.Desencriptar(_Sql["GoogleMaps:ApiKey"] ?? "");
+
+    using var client = new HttpClient();
+
+    var url = "https://routes.googleapis.com/directions/v2:computeRoutes";
+
+    var body = new
+    {
+        origin = new
+        {
+            location = new { latLng = new { latitude = 25.6866, longitude = -100.3161 } }
+        },
+        destination = new
+        {
+            location = new { latLng = new { latitude = 25.7415, longitude = -100.2860 } }
+        },
+        travelMode           = "DRIVE",
+        routingPreference    = "TRAFFIC_AWARE",
+        computeAlternativeRoutes = false,
+        languageCode         = "es-MX",
+        units                = "METRIC"
+    };
+
+    var json    = System.Text.Json.JsonSerializer.Serialize(body);
+    var request = new HttpRequestMessage(HttpMethod.Post, url);
+
+    request.Headers.Add("X-Goog-Api-Key",   apiKey);
+    request.Headers.Add("X-Goog-FieldMask",
+        "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline");
+
+    request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+
+    var response = await client.SendAsync(request);
+    var content  = await response.Content.ReadAsStringAsync();
+
+    if (!response.IsSuccessStatusCode)
+        throw new Exception(content);
+
+    return content;
+}
+```
+
+## Client-Side DirectionsService
+
+The "Armar ruta" modal uses the Maps JavaScript API's `DirectionsService` for real-time route preview. The origin is a fixed warehouse coordinate; each checked destination in the grid is passed as an intermediate waypoint:
+
+```javascript
+// wwwroot/js/armar-ruta-mapa.js — DirectionsService call (abridged)
+const directionsService  = new google.maps.DirectionsService();
+const directionsRenderer = new google.maps.DirectionsRenderer({ map });
+
+directionsService.route(
+  {
+    origin:      new google.maps.LatLng(origenLat, origenLng),
+    destination: ultimoDestino,
+    waypoints:   destinosActivos.slice(0, -1).map(d => ({
+      location: new google.maps.LatLng(d.lat, d.lng),
+      stopover: true
+    })),
+    travelMode:  google.maps.TravelMode.DRIVING
+  },
+  (result, status) => {
+    if (status === 'OK') {
+      directionsRenderer.setDirections(result);
+      // update distance / time KPIs in the modal footer
+    }
+  }
+);
+```
+
+## Classic Markers (No Map ID Required)
+
+The integration uses `google.maps.Marker` (the classic API) rather than `AdvancedMarkerElement`. This decision avoids the requirement for a **Map ID** in Google Cloud Console, which simplifies setup for new environments:
+
+```javascript
+// wwwroot/js/armar-ruta-mapa.js — numbered classic marker
+const marker = new google.maps.Marker({
+    position: { lat: destino.lat, lng: destino.lng },
+    map:      map,
+    label:    { text: String(index + 1), color: 'white', fontWeight: 'bold' },
+    title:    destino.nombre
+});
+```
+
+<Info>
+  If you switch to `AdvancedMarkerElement` in the future, you must create a Map ID in Google Cloud Console and assign it to `GoogleMapsOptions.MapId`. Update `Program.cs` to pass the Map ID alongside the API key, and update the `<script>` loading tag to include `&map_ids=YOUR_MAP_ID`.
+</Info>
+
+## Cache Busting
+
+All JavaScript files that interact with Google Maps are loaded in Razor views with the `asp-append-version="true"` tag helper. This appends a hash of the file content to the URL, ensuring browsers always load the latest version after a deployment:
+
+```html
+<!-- _Layout.cshtml / Rutas.cshtml -->
+<script src="~/js/armar-ruta-mapa.js"         asp-append-version="true"></script>
+<script src="~/js/nueva-ruta-integracion.js"   asp-append-version="true"></script>
+<script src="~/js/rutas2.js"                   asp-append-version="true"></script>
+```
+
+## Required Google Cloud APIs
+
+Enable all three APIs in your Google Cloud project to support both client-side and server-side functionality:
+
+| API | Used By | Purpose |
+|---|---|---|
+| **Maps JavaScript API** | Razor views (browser) | Interactive map rendering and markers |
+| **Directions API** | `DirectionsService` (browser) | Route preview polylines and waypoints |
+| **Routes API** | `RutasModel.CalcularRutaGoogleAsync()` (server) | Server-side distance/duration/polyline computation |
+
+<Tip>
+  Restrict your API key in Google Cloud Console by HTTP referrer (for the Maps JavaScript API) and by IP address or server identity (for the Routes API). Use separate keys for browser and server use to isolate blast radius if a key is compromised.
+</Tip>
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    DI registrations, request pipeline, and in-memory vs SQL data paths.
+  </Card>
+  <Card title="Security" icon="shield" href="/architecture/security">
+    How API keys and connection strings are Base64-encoded and managed with User Secrets.
+  </Card>
+  <Card title="Route Builder" icon="route" href="/features/route-builder">
+    End-user workflow for building and saving a route on the interactive map.
+  </Card>
+  <Card title="Rutas Mapa API" icon="code" href="/api/rutas-mapa">
+    REST endpoints used by the front-end map scripts.
+  </Card>
+</CardGroup>
