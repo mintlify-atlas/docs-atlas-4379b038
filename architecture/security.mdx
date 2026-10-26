@@ -1,7 +1,7 @@
 ---
 title: "Authentication, Sessions, and Credential Security"
 sidebarTitle: "Security"
-description: "Cookie-based auth flow, RBAC claims issued at login, Base64 credential obfuscation in SecurityHelper, and best practices for User Secrets and production key management."
+description: "Cookie auth flow, RBAC claims issued at login, Base64 obfuscation in SecurityHelper, password reset endpoint, and User Secrets management for Scan4."
 ---
 
 Scan4 uses ASP.NET Core's cookie authentication scheme for login sessions and a claim-based role and module model for access control. Sensitive values — connection strings, the Google Maps API key, and user passwords stored in the database — are Base64-encoded to prevent accidental plain-text exposure in config files and SQL snapshots. This page documents how each security mechanism works and what to replace before moving to a production environment.
@@ -181,6 +181,57 @@ WHERE ...
 string passwordEncrypted = SecurityHelper.Encriptar(model.Password);
 // Both forms are sent to the query as separate parameters
 ```
+
+## Password Reset
+
+The `POST /Home/RestablecerPassword` endpoint allows users to reset their own password from the login page without administrator intervention. The controller action is protected with `[ValidateAntiForgeryToken]` and verifies identity by cross-checking the submitted username, email address, and mobile phone number against `SMX_OHEM` before applying the change.
+
+```csharp
+// HomeController.cs — RestablecerPassword (abridged)
+[HttpPost]
+[ValidateAntiForgeryToken]
+public async Task<IActionResult> RestablecerPassword(
+    string usuarioRecuperar, string emailRecuperar,
+    string telefonoRecuperar, string nuevaPassword, string confirmarPassword)
+{
+    // All four fields are required
+    if (string.IsNullOrWhiteSpace(usuarioRecuperar) ||
+        string.IsNullOrWhiteSpace(emailRecuperar)   ||
+        string.IsNullOrWhiteSpace(telefonoRecuperar) ||
+        string.IsNullOrWhiteSpace(nuevaPassword))
+    {
+        TempData["ErrorRecuperar"] = "Capture todos los campos de validación requeridos.";
+        return RedirectToAction("Index");
+    }
+
+    if (nuevaPassword != confirmarPassword)
+    {
+        TempData["ErrorRecuperar"] = "Las contraseñas no coinciden.";
+        return RedirectToAction("Index");
+    }
+
+    var resultado = await _modelHome.CambiarPasswordAsync(
+        usuarioRecuperar, emailRecuperar, telefonoRecuperar, nuevaPassword);
+
+    TempData[resultado.Exito ? "ExitoRecuperar" : "ErrorRecuperar"] = resultado.Mensaje;
+    return RedirectToAction("Index");
+}
+```
+
+Internally, `HomeModel.CambiarPasswordAsync()` uses the `EditUserPassword` query from `Queries/Queries.json`, which updates both the profile fields and the `Password` column. The new password is Base64-encoded with `SecurityHelper.Encriptar()` before being written:
+
+```sql
+-- Queries/Queries.json — EditUserPassword
+UPDATE SMX_OHEM
+SET firstName = @firstName, LastName = @lastName, Email = @email,
+    U_Rol = @U_Rol, Active = @Active, Mobile = @Mobile,
+    [Password] = @Password
+WHERE [User] = @User
+```
+
+<Note>
+  On success the action sets `TempData["ExitoRecuperar"]` and redirects back to `/Home/Index`. On failure it sets `TempData["ErrorRecuperar"]` with the reason. The login view reads both keys to display the appropriate message to the user.
+</Note>
 
 ## Session
 

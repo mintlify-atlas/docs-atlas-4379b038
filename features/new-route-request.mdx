@@ -1,7 +1,7 @@
 ---
 title: "New Route Request: Geocoding and Cubicage Calculator"
 sidebarTitle: "New Route Request"
-description: "The Nueva Ruta modal lets users register a single pickup or delivery address. It geocodes the destination, calculates a real route from the ScanMex office, and computes package volume."
+description: "Nueva Ruta modal: register a single pickup or delivery address, geocode it, calculate real driving distance from ScanMex office, and persist to LOG_Rutas."
 ---
 
 The **Nueva Ruta** modal is accessed from the Routes view via the **Nueva ruta** button. It registers a single delivery or pickup address as a route request, geocodes the destination in the browser, calculates the actual driving distance and time from the ScanMex distribution centre, and collects package cubicage data. The entire workflow is handled client-side by `nueva-ruta-integracion.js` and `paquetes-cubicaje.js`; the form submits to `/Rutas/GuardarRuta` once all required fields are filled.
@@ -90,7 +90,11 @@ The `bd` parameter selects the SAP company database (SMXCDM\_PROD, SMXMTY\_PROD,
 
 ## Package Cubicage Sub-Form
 
-The lower section of the modal is powered by `paquetes-cubicaje.js` and allows the user to add one or more package items before submitting the request. Each item captures type, dimensions, and quantity; volume is computed entirely in the browser.
+The lower section of the modal is designed to be powered by `paquetes-cubicaje.js` and allows the user to add one or more package items before submitting the request. Each item captures type, dimensions, and quantity; volume is computed entirely in the browser.
+
+<Note>
+  The `paquetes-cubicaje.js` script is currently commented out in the Rutas view (`@* <script src="~/js/paquetes-cubicaje.js" ...> *@`). The cubicage sub-form UI and the `PaqueteSolicitud` / `SolicitudRutaRequest` models are in place but the client-side module is not yet active. The `GuardarRutaDTO` payload sent by the active form does not include package data at this time.
+</Note>
 
 ```javascript
 // wwwroot/js/paquetes-cubicaje.js — volume calculation per item
@@ -119,7 +123,7 @@ The total bultos count and total volume (shown in cm³ and m³) update live as i
 
 ## Request / Response
 
-On submit the form POSTs to `/Rutas/GuardarRuta` with the full route payload including cubicage data. The shape of that payload mirrors the `SolicitudRutaRequest` model used by the simulation endpoint:
+On submit the form POSTs to `/Rutas/GuardarRuta` with the full route payload. The shape of that payload matches the `GuardarRutaDTO` model (not `SolicitudRutaRequest`, which is used only by the simulation endpoint):
 
 ```json
 // POST /Rutas/GuardarRuta  — request body

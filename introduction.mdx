@@ -1,7 +1,7 @@
 ---
-title: "Scan4: Logistics Route Management for ScanMex"
+title: "Scan4 Pedidos Logistica: Route Management Platform"
 sidebarTitle: "Introduction"
-description: "Scan4 is an ASP.NET Core 8 MVC platform for ScanMex logistics teams to plan, assign, and track delivery routes with Google Maps and SAP Business One data."
+description: "Scan4 is an ASP.NET Core 8 MVC platform for ScanMex: manage delivery routes with Google Maps, RBAC for three roles, and SAP Business One client data."
 ---
 
 Scan4 — Pedidos Logística is the internal route-management system used by ScanMex to coordinate daily delivery operations. Built on ASP.NET Core 8 MVC, it brings together real-time Google Maps routing, live SAP Business One client data, and a role-based access model so that administrators, supervisors, and operators each see exactly the tools they need. From the moment a route request is created to the moment a driver closes out a delivery run, every step lives in one unified web application.
@@ -44,6 +44,20 @@ Scan4 serves three groups inside ScanMex:
     href="/admin/users"
   >
     Create, edit, and disable ScanMex staff accounts. Enforces `@scanmex.com` email domains and maps each user to one or more module permissions.
+  </Card>
+  <Card
+    title="Reports"
+    icon="chart-bar"
+    href="/features/reports"
+  >
+    The Reportes view (Module 3) surfaces aggregated delivery KPIs and historical route data drawn from the `SMXLOG` database for supervisors and administrators.
+  </Card>
+  <Card
+    title="Configuration"
+    icon="sliders"
+    href="/configuration"
+  >
+    Module 5 — system-level settings accessible only to Administrators. Controls application parameters stored in the logistics database.
   </Card>
 </CardGroup>
 

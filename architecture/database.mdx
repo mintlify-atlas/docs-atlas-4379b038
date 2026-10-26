@@ -1,7 +1,7 @@
 ---
 title: "Database Schema: SQL Server Tables and Queries"
 sidebarTitle: "Database"
-description: "Core SQL Server tables in SMXLOG, key parameterized queries from Queries.json, SAP B1 client lookup, and how to migrate the in-memory route store to SQL Server."
+description: "SQL Server tables in SMXLOG, parameterized queries from Queries.json, SAP B1 client lookup, and migrating the in-memory route store to SQL Server."
 ---
 
 Scan4 works with two SQL Server instances. The primary logistics database (**SMXLOG**, accessed via `SqlCon`) stores users, vehicles, module assignments, catalogue values, and persisted routes. A second read-only SAP Business One instance (**accessed via `SqlConSap`**) is queried to auto-fill client names and addresses from four regional company databases. All connection strings are Base64-encoded in `appsettings.json` and decoded at runtime by `ConfigurationExtensions.GetDecryptedConnectionString()`.

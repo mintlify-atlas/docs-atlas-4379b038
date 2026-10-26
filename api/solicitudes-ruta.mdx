@@ -149,7 +149,7 @@ Validates a single-address route request, assigns an in-memory folio, and return
       Echoed service type: `"Recolección"` or `"Entrega"`.
     </ResponseField>
     <ResponseField name="fechaHoraRecoleccion" type="string">
-      Combined date and time string formatted as `"yyyy-MM-dd HH:mm"` (e.g. `"2026-07-10 10:30"`). Assembled server-side from `fecha` and `hora`.
+      Combined date-time string assembled server-side as `"{fecha:yyyy-MM-dd} {hora}".Trim()` — the date is formatted as `yyyy-MM-dd` and the raw `hora` string is appended verbatim (e.g. `"2026-07-10 10:30"`). The result is trimmed, so an empty `hora` produces just the date.
     </ResponseField>
     <ResponseField name="paquetes" type="array of PaqueteSolicitud">
       Echoed package list. If none were submitted, returns an empty array `[]`.

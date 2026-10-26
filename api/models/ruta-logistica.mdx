@@ -134,11 +134,11 @@ public class PuntoGeografico
 
 ## Full JSON Example
 
-The following example shows a route with two active delivery stops created for the Centro zone.
+The following example shows a route body as it should be sent in a `POST /api/rutas-mapa` request. Set `rutaId` to `0` — the server assigns the final identifier and returns the same object with `rutaId` populated in the `201 Created` response.
 
 ```json
 {
-  "rutaId": 1001,
+  "rutaId": 0,
   "origen": {
     "lat": 19.384948,
     "lng": -99.174292

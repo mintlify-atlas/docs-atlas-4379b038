@@ -1,7 +1,7 @@
 ---
-title: "Roles and Module Permissions in Scan4"
+title: "Roles, Module Permissions, and Access Control in Scan4"
 sidebarTitle: "Roles & Permissions"
-description: "Covers the three built-in roles (Admin, Supervisor, Operator), the five module claim system, cookie auth settings, and per-controller access enforcement patterns."
+description: "Three-role system, five module claims, cookie auth properties, post-login redirect logic, and password reset endpoint for Scan4 logistics."
 ---
 
 Scan4 uses a two-layer permission model: every authenticated user holds a **role** (stored in `U_Rol` in `SMX_OHEM`) that defines their broad category, and zero or more **module claims** (sourced from `SMX_MDAP`) that grant access to individual sections of the application. The combination of role and module claims is encoded into a cookie at login and checked on every request — no database lookup is required to enforce access within a session.
@@ -84,6 +84,31 @@ await HttpContext.SignInAsync(
 ```
 
 The 8-hour expiry covers a full working shift. The cookie is **not** marked `IsPersistent`, so it is cleared when the browser session ends regardless of the expiry time.
+
+## Password Reset
+
+Users who cannot log in can recover their account without administrator intervention through the password reset endpoint on the login page. This endpoint is the only unauthenticated write operation in the application.
+
+```http
+POST /Home/RestablecerPassword
+Content-Type: application/x-www-form-urlencoded
+```
+
+All five fields are required. The controller rejects the request — with a `TempData["ErrorRecuperar"]` message — if any of the first four fields are blank, or if the two password fields do not match.
+
+| Field | Description |
+|---|---|
+| `usuarioRecuperar` | The username of the account to reset. |
+| `emailRecuperar` | The corporate email address on file for that user. |
+| `telefonoRecuperar` | The phone number on file for that user. |
+| `nuevaPassword` | The new password to set. |
+| `confirmarPassword` | Confirmation — must match `nuevaPassword` exactly. |
+
+The controller delegates to `HomeModel.CambiarPasswordAsync(usuarioRecuperar, emailRecuperar, telefonoRecuperar, nuevaPassword)`, which validates the three identity fields against `SMX_OHEM` before updating the password. On success, `TempData["ExitoRecuperar"]` is set and the browser is redirected back to the login page (`GET /Home/Index`).
+
+<Note>
+  The form is protected by `[ValidateAntiForgeryToken]`. Direct API calls (e.g. from Postman) must include a valid `__RequestVerificationToken` value from the login page HTML or they will receive a `400 Bad Request`.
+</Note>
 
 ## Controller Enforcement Pattern
 

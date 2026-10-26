@@ -1,5 +1,5 @@
 ---
-title: "Get Scan4 Running Locally in Under 10 Minutes"
+title: "Get Scan4 Running Locally: Clone, Configure, Log In"
 sidebarTitle: "Quickstart"
 description: "Clone the repo, wire up SQL Server and Google Maps credentials with .NET User Secrets, and have Scan4 serving on localhost in a few commands."
 ---
@@ -45,8 +45,18 @@ Scan4 stores all sensitive values — connection strings and the Google Maps API
 // Helpers/SecurityHelper.cs
 public static string Desencriptar(string info)
 {
-    byte[] BytesDesencriptar = Convert.FromBase64String(info);
-    return Encoding.UTF8.GetString(BytesDesencriptar);
+    if (string.IsNullOrEmpty(info))
+        return info;
+
+    try
+    {
+        byte[] BytesDesencriptar = Convert.FromBase64String(info);
+        return Encoding.UTF8.GetString(BytesDesencriptar);
+    }
+    catch (Exception)
+    {
+        return info;
+    }
 }
 ```
 
@@ -124,6 +134,31 @@ After authentication the app redirects each user to their first permitted module
 | Module 5 only | `/Configuracion/Configuracion` |
 
 If a user has no module assignments, they land on `/Home/SinAcceso`.
+
+</Step>
+
+<Step title="Reset a forgotten password">
+
+If a user cannot log in because they have forgotten their password, Scan4 provides a self-service password reset flow. The reset endpoint verifies the user's identity against three fields before accepting a new password:
+
+```http
+POST /Home/RestablecerPassword
+Content-Type: application/x-www-form-urlencoded
+```
+
+| Parameter | Required | Description |
+|---|---|---|
+| `usuarioRecuperar` | ✅ | Username stored in `SMX_OHEM` |
+| `emailRecuperar` | ✅ | Email address on file for that user |
+| `telefonoRecuperar` | ✅ | Phone number on file for that user |
+| `nuevaPassword` | ✅ | The desired new password |
+| `confirmarPassword` | ✅ | Must match `nuevaPassword` exactly |
+
+The endpoint is decorated with `[ValidateAntiForgeryToken]`, so it must be called through the login-page form (not a raw API client). On success, a success message is stored in `TempData["ExitoRecuperar"]` and the user is redirected to `/Home/Index` to log in with the new password. On failure (identity mismatch or password mismatch), `TempData["ErrorRecuperar"]` carries the error message.
+
+<Note>
+All five parameters are required. If any of `usuarioRecuperar`, `emailRecuperar`, `telefonoRecuperar`, or `nuevaPassword` is blank, the controller short-circuits with an error before calling `CambiarPasswordAsync`.
+</Note>
 
 </Step>
 

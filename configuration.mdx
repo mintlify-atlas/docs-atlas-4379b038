@@ -78,19 +78,32 @@ The `SecurityHelper` round-trip that encodes and decodes is straightforward:
 // Helpers/SecurityHelper.cs
 public static string Encriptar(string info)
 {
+    if (string.IsNullOrEmpty(info))
+        return info;
+
     byte[] BytesEncriptar = Encoding.UTF8.GetBytes(info);
     return Convert.ToBase64String(BytesEncriptar);
 }
 
 public static string Desencriptar(string info)
 {
-    byte[] BytesDesencriptar = Convert.FromBase64String(info);
-    return Encoding.UTF8.GetString(BytesDesencriptar);
+    if (string.IsNullOrEmpty(info))
+        return info;
+
+    try
+    {
+        byte[] BytesDesencriptar = Convert.FromBase64String(info);
+        return Encoding.UTF8.GetString(BytesDesencriptar);
+    }
+    catch (Exception)
+    {
+        return info;
+    }
 }
 ```
 
 <Note>
-`Desencriptar` wraps the decode in a `try/catch` and returns the raw string if it is not valid Base64. This means if you accidentally store a plain-text connection string it will still be used as-is, but this is not recommended.
+`Desencriptar` wraps the Base64 decode in a `try/catch` and returns the raw string unchanged if it is not valid Base64. This means if you accidentally store a plain-text connection string it will still be used as-is, but this is not recommended.
 </Note>
 
 ## Google Maps API key

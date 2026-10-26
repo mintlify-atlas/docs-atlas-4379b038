@@ -1,7 +1,7 @@
 ---
 title: "Google Maps Integration: Routes and Geocoding"
 sidebarTitle: "Google Maps"
-description: "How Scan4 loads the Maps JavaScript API in Razor views, calls the server-side Routes API, manages the API key securely, and handles classic markers without a Map ID."
+description: "How Scan4 loads the Maps JavaScript API in Razor views, calls the Routes API server-side, manages the API key via User Secrets, and uses classic markers."
 ---
 
 Scan4 uses Google Maps in two distinct ways. In the browser, the **Maps JavaScript API** renders interactive delivery maps with numbered markers and a live `DirectionsService` polyline. On the server, **`RutasModel.CalcularRutaGoogleAsync()`** calls the **Routes API** via `HttpClient` to compute distances and travel times for a route. Both surfaces use the same API key, configured via .NET User Secrets in development and injected through `IOptions<GoogleMapsOptions>` in the application.

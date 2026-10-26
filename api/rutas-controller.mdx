@@ -7,7 +7,7 @@ description: "Reference for the MVC JSON actions in RutasController that save ro
 The **Rutas Controller** (`/Rutas/*`) is an ASP.NET Core MVC controller — not `[ApiController]` — that persists routes to SQL Server via `RutasModel` and exposes JSON actions consumed by the Scan4 frontend JavaScript (`rutas.js`, `rutas2.js`). Unlike the `/api/rutas-mapa` in-memory endpoints, all write operations here go to the `LOG_Rutas` and `LOG_Rutas_Destinos` tables in the configured database.
 
 <Warning>
-  All endpoints in this controller require an authenticated session cookie (`[Authorize]`). Unauthenticated requests are redirected to the login page. Operators (role `3`) are silently blocked from all write actions (`GuardarRuta`, `ReasignarOperador`, `ReprogramarFecha`, `FinalizarRuta`) — the server returns `403 Forbidden` without an error body.
+  All endpoints in this controller require an authenticated session cookie (`[Authorize]`). Unauthenticated requests are redirected to the login page. Operators (role `3`) are silently blocked from all write actions (`GuardarRuta`, `ReasignarOperador`, `ReprogramarFecha`, `FinalizarRuta`) — the server calls `return Forbid()`, which produces HTTP `403` with no response body.
 </Warning>
 
 ---
@@ -27,7 +27,7 @@ private bool IsOperador()
 |------------|-------------|--------------|
 | `1` (Admin) | ✅ All routes | ✅ All actions |
 | `2` (Supervisor) | ✅ All routes | ✅ All actions |
-| `3` (Operador) | ✅ Own routes only | ❌ Returns `403` |
+| `3` (Operador) | ✅ Own routes only | ❌ `Forbid()` → HTTP 403, no body |
 
 Operators also have their **route list filtered** server-side: `ObtenerRutas` injects the session's `ClaimTypes.Name` and `EmpID` claim into `RutasModel.ObtenerRutasAsync` to return only that driver's routes.
 
@@ -425,10 +425,10 @@ Auto-fills the destination form with SAP Business Partner data when the dispatch
     ```
 
     <ParamField query="bd" type="string" required>
-      Target SAP database name (e.g. `"SMXGDL_PROD"`, `"SMXMTY_PROD"`). Used to select the correct company database in the multi-company setup.
+      Target SAP database name. Must be one of the permitted values: `"SMXCDM_PROD"`, `"SMXMTY_PROD"`, `"SMXGDL_PROD"`, or `"SMXGOT_PROD"`. Any other value is rejected server-side (the model layer validates against a hardcoded whitelist to prevent SQL injection via database name interpolation) and returns `404` because the model returns an empty result set.
     </ParamField>
     <ParamField query="rfc" type="string" required>
-      Client RFC to look up. Queried against the `LicTradNum` column in the SAP Business Partners table. If the RFC is registered under multiple `CardCode` entries, the first row is returned.
+      Client RFC to look up. Queried against the `LicTradNum` column in the SAP `OCRD` Business Partners table (`SELECT … FROM {bd}.dbo.OCRD WHERE LicTradNum = @LicTradNum`). If the RFC is registered under multiple `CardCode` entries, the first row is returned.
     </ParamField>
   </Tab>
   <Tab title="Response 200">
@@ -460,7 +460,7 @@ Auto-fills the destination form with SAP Business Partner data when the dispatch
     ```
   </Tab>
   <Tab title="Response 404">
-    Returned when no Business Partner with the given RFC is found in the specified database.
+    Returned when no Business Partner matching the RFC is found, **or** when `bd` is not in the permitted whitelist (the model returns an empty result set in both cases, which the controller maps to `NotFound`).
 
     ```json
     { "error": "Cliente no encontrado" }
@@ -469,5 +469,5 @@ Auto-fills the destination form with SAP Business Partner data when the dispatch
 </Tabs>
 
 <Info>
-  `GetClienteDetalle` is a read-only lookup — it does not write to the Scan4 database. The `bd` parameter selects the SAP company database so that a single Scan4 instance can serve multiple ScanMex subsidiaries. Make sure the SQL user configured in `appsettings.json` has `SELECT` access to the target SAP database.
+  `GetClienteDetalle` is a read-only lookup — it does not write to the Scan4 database. The `bd` parameter selects the SAP company database so that a single Scan4 instance can serve multiple ScanMex subsidiaries. The connection string used is `"SqlConSap"` from `appsettings.json` (falling back to `"SqlCon"` if absent). Make sure the SQL user has `SELECT` access to the `OCRD` table in the target SAP database.
 </Info>

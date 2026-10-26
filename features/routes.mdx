@@ -1,7 +1,7 @@
 ---
-title: "Routes Module: Daily Route Cards and Assignments"
+title: "Routes Module: Daily Route Cards and Operator Assignments"
 sidebarTitle: "Routes"
-description: "Module 2 in Scan4. Displays one route card per day for the current 7-day window, with operator and vehicle assignment, status colours, and per-route destination tracking."
+description: "Module 2 in Scan4. Shows a daily route card for each of the next 7 days, with operator and vehicle assignment, status colours, and destination tracking."
 ---
 
 The Routes module is the operational heart of Scan4 — Pedidos Logística. Supervisors and operators use it to view the week's delivery schedule, assign drivers and vehicles, track route progress, and launch the interactive Route Builder or the New Route Request form. The view is served by `RutasController.Rutas()` and is protected by the same role/module-claim pattern used across the platform.
@@ -68,7 +68,7 @@ const CATALOGO_DESTINOS = [
 
 | Day | Destination count |
 |-----|-------------------|
-| Today | Always **5** — Polanco, Santa Fe, Texcoco, Xochimilco, + one random from the catalogue |
+| Today | Always **5**, randomly drawn from `CATALOGO_DESTINOS` |
 | All other days | **3 – 5** randomly drawn from `CATALOGO_DESTINOS` |
 
 <Note>

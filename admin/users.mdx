@@ -1,7 +1,7 @@
 ---
 title: "User Management: Create, Edit, and Deactivate Users"
 sidebarTitle: "Users"
-description: "Manage ScanMex staff accounts in SMX_OHEM: create users with role and module assignments, edit profiles, change passwords, and soft-delete inactive accounts."
+description: "Manage ScanMex staff accounts in SMX_OHEM: create users with role and module assignments, edit profiles, reset passwords, and deactivate accounts."
 ---
 
 The Users module (Module 4) is the central hub for managing ScanMex operator and supervisor accounts in Scan4. Administrators can register new users, update profiles and role assignments, grant per-module permissions, and soft-delete accounts that are no longer active — all without ever removing a record from the `SMX_OHEM` table. Non-admin users can be granted access to this module via the `SMX_MDAP` permissions table.
@@ -173,7 +173,7 @@ Module assignments in `SMX_MDAP` are always refreshed after the user row update.
 GET /Usuarios/DeleteUser?id={username}
 ```
 
-Sets `Active = 0` in `SMX_OHEM` — the record is **never physically removed**. Module permission rows in `SMX_MDAP` are also deactivated (`ACTIVE = 0`) in the same request.
+Sets `Active = 0` in `SMX_OHEM` — the record is **never physically removed**. Module permission rows in `SMX_MDAP` are set to `ACTIVE = 0` in the same operation (using a separate inline statement, not the named `DeleteUserModules` query).
 
 ```sql
 -- Queries:DeleteUser
@@ -181,6 +181,16 @@ UPDATE SMX_OHEM SET Active = 0 WHERE [User] = @User
 ```
 
 On success, `TempData["UserEdited"]` contains _"Usuario inhabilitado correctamente"_ and `TempData["ck_SelectedInput"]` is set to `"edicion"` to trigger the edit tab in the UI.
+
+<Note>
+  After setting `Active = 0`, the model immediately runs a second inline statement to deactivate all module assignments for the same user:
+
+  ```sql
+  UPDATE SMX_MDAP SET [ACTIVE] = 0 WHERE [CODE] = @User
+  ```
+
+  This is **not** a physical delete — the `SMX_MDAP` rows are kept with `ACTIVE = 0` so they can be reviewed or reactivated if the user is re-enabled directly in the database.
+</Note>
 
 ---
 
@@ -251,8 +261,11 @@ WHERE (T0.[User] = @User OR T0.[Email] = @User)
 ```
 </Accordion>
 
-<Accordion title="DeleteUserModules — clear module assignments before refresh">
+<Accordion title="DeleteUserModules — clear module assignments before refresh (used during EditUser)">
 ```sql
+-- Queries:DeleteUserModules
+-- Called by SaveUserModules() before re-inserting module rows during EditUser.
+-- Not used during soft-delete; that path uses an inline UPDATE SMX_MDAP SET ACTIVE = 0.
 DELETE FROM SMX_MDAP WHERE [CODE] = @User
 ```
 </Accordion>
